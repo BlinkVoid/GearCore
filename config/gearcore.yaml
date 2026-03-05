@@ -1,0 +1,26 @@
+hub:
+  disclosure_strategy: semantic
+  host: 127.0.0.1
+  log_level: info
+  port: 8686
+  process_timeout_ms: 3600000
+mcp_servers:
+- args:
+  - -y
+  - '@modelcontextprotocol/server-filesystem'
+  - .
+  command: npx
+  enabled: true
+  id: local-fs
+  type: stdio
+resolution:
+  auto_deduplicate: true
+  categories:
+    file_io:
+      namespace_prefix: fs_
+      preferred: local-fs
+      strategy: namespace
+skills:
+  activation_threshold: 0.85
+  core_skills: []
+  directory: ./skills
