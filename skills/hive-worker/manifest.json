@@ -1,0 +1,23 @@
+{
+  "name": "swarm-worker",
+  "version": "1.0.0",
+  "description": "Swarm gateway worker tools — register, poll tasks, submit results, heartbeat.",
+  "category": "core",
+  "mcp_servers": [
+    {
+      "server_id": "swarm-gateway",
+      "tools": [
+        "worker_register",
+        "worker_poll_task",
+        "worker_submit_result",
+        "worker_heartbeat",
+        "worker_deregister",
+        "worker_get_messages"
+      ]
+    }
+  ],
+  "activation": {
+    "strategy": "auto",
+    "triggers": ["worker", "register", "task", "poll", "submit"]
+  }
+}
