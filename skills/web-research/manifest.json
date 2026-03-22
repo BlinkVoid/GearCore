@@ -1,0 +1,23 @@
+{
+  "name": "web-research",
+  "version": "1.0.0",
+  "description": "Web browsing and research via Playwright browser automation.",
+  "category": "research",
+  "mcp_servers": [
+    {
+      "server_id": "playwright",
+      "tools": [
+        "browser_navigate",
+        "browser_screenshot",
+        "browser_click",
+        "browser_type",
+        "browser_tab_list",
+        "browser_close"
+      ]
+    }
+  ],
+  "activation": {
+    "strategy": "manual",
+    "triggers": ["web", "browser", "research", "scrape", "navigate", "screenshot"]
+  }
+}
