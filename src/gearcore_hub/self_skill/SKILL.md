@@ -12,8 +12,8 @@ window stays lean by default.
 ## When to invoke GearCore
 
 Invoke GearCore when you need to:
-- Discover what tools or skills are available
-- Unlock a specific skill to gain access to its tools
+- Discover what skills are available in the current context
+- Load a skill to get its instructions and tool commands
 - Work within a project that has a `.gearcore/` directory (project-scoped context)
 
 ## How to invoke
@@ -36,22 +36,29 @@ to that project.
 ## Workflow
 
 ### 1. Discover available skills
-After invoking, call:
+```bash
+gearcore list-skills
+gearcore list-skills --project /absolute/path/to/project
 ```
-list_skills
-```
-Returns all skills visible in the current context with name, description, category,
+Returns all skills visible in the current context with name, description,
 and scope (global or project).
 
-### 2. Unlock a skill
+### 2. Load a skill
+```bash
+gearcore request-skill <skill_name>
+gearcore request-skill <skill_name> --project /absolute/path/to/project
 ```
-request_skill <skill_name>
-```
-Returns the SKILL.md instructions for that skill and makes its tools available
-in subsequent `list_tools` calls.
+Prints the skill's instructions (SKILL.md). Read and follow these instructions
+to use the skill's capabilities with your native tools.
 
-### 3. Use the tools
-Once a skill is activated, its tools appear in `list_tools`. Call them directly.
+### 3. Use the skill's tools
+Skills that require MCP backends provide tools via `gearcore call`:
+```bash
+gearcore call <server_id> <tool_name> '<json_args>'
+```
+Each `request-skill` output lists the exact `gearcore call` commands available.
+This is a stateless one-shot invocation — GearCore connects to the backend,
+makes the call, prints the result, and exits.
 
 ## Project-scoped context
 

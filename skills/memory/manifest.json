@@ -1,15 +1,15 @@
 {
   "name": "memory",
   "version": "1.0.0",
-  "description": "Query persistent memory via Memcore for historical context and learned knowledge.",
+  "description": "Query and store persistent memory via MemCore for historical context and learned knowledge.",
   "category": "knowledge",
   "mcp_servers": [
     {
       "server_id": "memcore",
       "tools": [
         "mem_query",
-        "mem_search",
-        "mem_store"
+        "mem_save",
+        "add_task"
       ]
     }
   ],

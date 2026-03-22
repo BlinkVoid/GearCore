@@ -2,34 +2,17 @@ version: 2
 
 registry:
   mcp_servers:
-    # Filesystem — restricted to local workspace
-    - id: filesystem
-      type: stdio
-      command: npx
-      args:
-        - -y
-        - "@modelcontextprotocol/server-filesystem"
-        - /home/r345/workspace
-      enabled: true
-
     # HIVE Gateway — worker task queue and registration
     - id: hive-gateway
       type: sse
       url: http://127.0.0.1:7111/sse
       enabled: true
 
-    # MemCore — persistent tiered memory
+    # MemCore — persistent tiered memory (HTTP transport)
     - id: memcore
-      type: stdio
-      command: /home/r345/workspace/MemCore/.venv/bin/python
-      args:
-        - -m
-        - src.memcore.main
-        - --mode
-        - stdio
-      env:
-        PYTHONPATH: /home/r345/workspace/MemCore
-      enabled: false  # enable after MemCore venv is rebuilt
+      type: http
+      url: http://127.0.0.1:8080/sse
+      enabled: false  # enable when MemCore server is running
 
     # Playwright — browser automation
     - id: playwright
@@ -52,10 +35,6 @@ disclosure:
 resolution:
   auto_deduplicate: true
   categories:
-    file_io:
-      preferred: filesystem
-      strategy: namespace
-      namespace_prefix: fs_
     web_search:
       preferred: playwright
       strategy: suppress_others
