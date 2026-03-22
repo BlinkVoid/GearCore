@@ -27,11 +27,17 @@ class SkillBundle:
 
 class SkillManager:
     """Manages loading and discovery of Skill Bundles."""
-    def __init__(self, skills_dir: str):
+    def __init__(self, skills_dir: str, core_skills: Optional[List[str]] = None):
         self.skills_dir = Path(skills_dir)
         self.skills: Dict[str, SkillBundle] = {}
         self.active_skills: Set[str] = set()
+        self._core_skills = core_skills or []
         self.refresh_skills()
+        # Auto-activate core skills
+        for name in self._core_skills:
+            if name in self.skills:
+                self.activate_skill(name)
+                logger.info(f"Auto-activated core skill: {name}")
 
     def refresh_skills(self):
         """Scan the skills directory for valid bundles."""

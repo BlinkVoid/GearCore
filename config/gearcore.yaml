@@ -4,23 +4,34 @@ hub:
   log_level: info
   port: 8686
   process_timeout_ms: 3600000
+
 mcp_servers:
-- args:
-  - -y
-  - '@modelcontextprotocol/server-filesystem'
-  - .
-  command: npx
-  enabled: true
-  id: local-fs
-  type: stdio
+  # Filesystem — restricted to honeycomb workspace
+  - id: filesystem
+    type: stdio
+    command: npx
+    args:
+      - -y
+      - '@modelcontextprotocol/server-filesystem'
+      - E:/workspace/HIVE/honeycomb
+    enabled: true
+
+  # HIVE Gateway — worker task queue and registration
+  - id: hive-gateway
+    type: sse
+    url: http://127.0.0.1:7111/sse
+    enabled: true
+
 resolution:
   auto_deduplicate: true
   categories:
     file_io:
       namespace_prefix: fs_
-      preferred: local-fs
+      preferred: filesystem
       strategy: namespace
+
 skills:
-  activation_threshold: 0.85
-  core_skills: []
   directory: ./skills
+  activation_threshold: 0.85
+  core_skills:
+    - hive-worker
