@@ -30,7 +30,10 @@ registry:
 disclosure:
   strategy: manual
   activation_threshold: 0.85
-  core_skills: []   # nothing auto-loaded globally — projects set their own core_skills
+  core_skills:
+    - first-principles-scientific-mindset
+  # Auto-load the reasoning discipline skill globally. It carries no tools and keeps
+  # the default operating model grounded in fundamentals, evidence, and validation.
 
 resolution:
   auto_deduplicate: true

@@ -43,7 +43,9 @@ registry:
 disclosure:
   strategy: manual               # manual | semantic (semantic not yet implemented)
   activation_threshold: 0.85     # for future semantic activation
-  core_skills: []                # skill names to auto-activate on every session
+  core_skills:
+    - first-principles-scientific-mindset
+                                 # skill names to auto-activate on every session
 
 resolution:
   auto_deduplicate: true
@@ -113,6 +115,7 @@ scope:
 
   skills:
     include:                     # allowlist — only these global skills are visible
+      - first-principles-scientific-mindset
       - hive-worker
       - code-ops
       - memory
@@ -120,6 +123,7 @@ scope:
 # Optional — overrides global disclosure for this project
 disclosure:
   core_skills:
+    - first-principles-scientific-mindset
     - hive-worker                # auto-activate when this project loads
   activation_threshold: 0.90
 ```

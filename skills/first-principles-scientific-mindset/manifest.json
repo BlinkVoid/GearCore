@@ -1,0 +1,19 @@
+{
+  "name": "first-principles-scientific-mindset",
+  "version": "1.0.0",
+  "description": "Core reasoning discipline: derive from fundamentals, make assumptions explicit, form falsifiable hypotheses, and verify against evidence.",
+  "category": "core",
+  "mcp_servers": [],
+  "activation": {
+    "strategy": "auto",
+    "triggers": [
+      "first principles",
+      "fundamentals",
+      "scientific method",
+      "hypothesis",
+      "assumptions",
+      "evidence",
+      "verification"
+    ]
+  }
+}
