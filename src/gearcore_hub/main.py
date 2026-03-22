@@ -1,183 +1,184 @@
+"""
+GearCore CLI entry point.
+
+Subcommands:
+  serve        (default) Run the MCP hub — invoked by AI CLI tools via skill manifest
+  status       Show active servers and loaded skills
+  list         Alias for status
+  add-mcp      Register a new MCP server
+  add-skill    Register a skill bundle
+  add-cli      Wrap a CLI program into a skill via CLI-Anything
+  remove       Remove an MCP server or skill
+  sync         Install/update the GearCore self-skill on AI CLI tools
+
+Usage:
+  gearcore [--project <path>] [serve]
+  gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
+  gearcore add-skill <path> [--scope global|project] [--symlink]
+  gearcore add-cli <program> [--scope global|project]
+  gearcore remove mcp <id> | skill <name> [--scope global|project]
+  gearcore sync [--tool claude|codex|kimi] [--dry-run] [--remove]
+  gearcore status
+"""
+from __future__ import annotations
+
+import argparse
 import asyncio
 import logging
-import yaml
-import json
 import signal
 import sys
-from typing import List, Any, Optional, Dict
 from pathlib import Path
+from typing import List, Optional
+
 from mcp.server import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
-from gearcore_hub.process_manager import ProcessManager
+
+from gearcore_hub.config import load_config, EffectiveConfig
 from gearcore_hub.skill_manager import SkillManager
+from gearcore_hub.process_manager import ProcessManager
 from gearcore_hub.conflict_resolver import ConflictResolver
 
-# Formalized Logging to stderr (mandatory for stdio transport)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    stream=sys.stderr
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    stream=sys.stderr,
 )
-logger = logging.getLogger("gearcore.hub")
+logger = logging.getLogger("gearcore")
+
+
+# ---------------------------------------------------------------------------
+# Serve command — the MCP hub runtime
+# ---------------------------------------------------------------------------
 
 class GearCoreHub:
-    def __init__(self, config_path: str):
-        self.config_path = config_path
-        self.config = {}
+    def __init__(self, config: EffectiveConfig):
+        self.config = config
         self.process_manager = ProcessManager()
-        self.skill_manager: Optional[SkillManager] = None
-        self.conflict_resolver: Optional[ConflictResolver] = None
-        self.resolved_tool_map: Dict[str, Dict[str, str]] = {}
-        
+        self.skill_manager = SkillManager(config)
+        self.conflict_resolver = ConflictResolver(config.resolution.model_dump())
+        self.resolved_tool_map: dict = {}
         self.server = Server("gearcore-hub")
-        self.reload_config()
         self._setup_handlers()
 
-    def reload_config(self):
-        """Load or reload the gearcore.yaml configuration."""
-        try:
-            with open(self.config_path, "r") as f:
-                self.config = yaml.safe_load(f)
-            
-            # Re-initialize managers
-            skills_cfg = self.config.get("skills", {})
-            skills_dir = skills_cfg.get("directory", "./skills")
-            core_skills = skills_cfg.get("core_skills", [])
-            self.skill_manager = SkillManager(skills_dir, core_skills=core_skills)
-            self.conflict_resolver = ConflictResolver(self.config.get("resolution", {}))
-            
-            logger.info(f"Configuration reloaded from {self.config_path}")
-        except Exception as e:
-            logger.error(f"Failed to load config: {e}")
-            if not self.config:
-                sys.exit(1)
-
-    async def _start_backends(self):
-        """Pre-load and start all enabled MCP servers."""
-        for server_cfg in self.config.get("mcp_servers", []):
-            if server_cfg.get("enabled", True):
-                try:
-                    await self.process_manager.register_and_start(server_cfg)
-                except Exception as e:
-                    logger.error(f"Failed to start backend {server_cfg.get('id')}: {e}")
-
     def _setup_handlers(self):
-        """Set up standard MCP handlers with Skill and Conflict integration."""
-        
         @self.server.list_tools()
         async def handle_list_tools() -> List[Tool]:
-            """Aggregate tools with Progressive Disclosure and Conflict Resolution."""
-            # 1. Core Hub Tools
             all_tools = [
                 Tool(
                     name="list_skills",
-                    description="List available GearCore skill bundles.",
-                    inputSchema={"type": "object", "properties": {}}
+                    description="List available GearCore skill bundles in the current context.",
+                    inputSchema={"type": "object", "properties": {}},
                 ),
                 Tool(
                     name="request_skill",
-                    description="Unlock a skill bundle (injects instructions and tools).",
+                    description="Unlock a skill bundle to inject its instructions and expose its tools.",
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "description": "The name of the skill bundle."}
+                            "name": {"type": "string", "description": "Skill name to unlock."}
                         },
-                        "required": ["name"]
-                    }
-                )
+                        "required": ["name"],
+                    },
+                ),
             ]
-            
-            # 2. Aggregation & Disclosure
+
             aggregated_raw = []
             for server_id, server in self.process_manager.servers.items():
                 if server.session:
                     try:
                         resp = await server.session.list_tools()
                         for tool in resp.tools:
-                            # Only disclose if the tool is active in a skill
-                            if self.skill_manager and self.skill_manager.is_tool_active(server_id, tool.name):
+                            if self.skill_manager.is_tool_active(server_id, tool.name):
                                 aggregated_raw.append({
-                                    "server_id": server_id, 
-                                    "tool": tool, 
-                                    "original_name": tool.name
+                                    "server_id": server_id,
+                                    "tool": tool,
+                                    "original_name": tool.name,
                                 })
-                    except Exception as e:
-                        logger.error(f"Failed to list tools for {server_id}: {e}")
-            
-            # 3. Resolve Conflicts & Update Routing Map
-            if self.conflict_resolver:
-                resolved = self.conflict_resolver.resolve(aggregated_raw)
-                self.resolved_tool_map.clear()
-                for entry in aggregated_raw:
-                    resolved_name = entry["tool"].name
-                    self.resolved_tool_map[resolved_name] = {
-                        "server_id": entry["server_id"],
-                        "original_name": entry["original_name"]
-                    }
-                all_tools.extend(resolved)
-            
+                    except Exception as exc:
+                        logger.error("list_tools failed for %s: %s", server_id, exc)
+
+            resolved = self.conflict_resolver.resolve(aggregated_raw)
+            self.resolved_tool_map.clear()
+            for entry in aggregated_raw:
+                self.resolved_tool_map[entry["tool"].name] = {
+                    "server_id": entry["server_id"],
+                    "original_name": entry["original_name"],
+                }
+            all_tools.extend(resolved)
             return all_tools
 
         @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict | None) -> List[TextContent | ImageContent | EmbeddedResource]:
-            """Route tool calls with error handling."""
-            
+        async def handle_call_tool(
+            name: str, arguments: dict | None
+        ) -> List[TextContent | ImageContent | EmbeddedResource]:
+
             if name == "list_skills":
                 skills = self.skill_manager.list_available_skills()
-                formatted = "Available GearCore Skills:\n" + "\n".join(
-                    [f"- {s['name']}: {s['description']} ({s['status']})" for s in skills]
-                )
-                return [TextContent(type="text", text=formatted)]
+                ctx = self.config.context_name
+                lines = [f"GearCore skills ({ctx} context):\n"]
+                for s in skills:
+                    tag = "[active]" if s["status"] == "active" else ""
+                    scope_tag = "[project]" if s["scope"] == "project" else ""
+                    lines.append(f"  {s['name']} {tag}{scope_tag} — {s['description']}")
+                return [TextContent(type="text", text="\n".join(lines))]
 
-            elif name == "request_skill":
-                skill_name = (arguments or {}).get("name")
+            if name == "request_skill":
+                skill_name = (arguments or {}).get("name", "")
                 if not skill_name:
-                    return [TextContent(type="text", text="Error: Missing 'name' argument.")]
-                
+                    return [TextContent(type="text", text="Error: missing 'name' argument.")]
                 skill = self.skill_manager.get_skill(skill_name)
                 if not skill:
-                    return [TextContent(type="text", text=f"Error: Skill '{skill_name}' not found.")]
-                
+                    return [TextContent(type="text", text=f"Error: skill '{skill_name}' not found or not visible in this context.")]
                 self.skill_manager.activate_skill(skill_name)
-                logger.info(f"Skill activated: {skill_name}")
-                
-                instructions = f"### SKILL LOADED: {skill_name}\n\n{skill.instructions}\n\n"
-                instructions += f"Tools for '{skill_name}' are now available."
-                return [TextContent(type="text", text=instructions)]
+                text = f"### SKILL LOADED: {skill_name}\n\n{skill.instructions}\n\nTools for '{skill_name}' are now available."
+                return [TextContent(type="text", text=text)]
 
-            # Backend Tool Routing
             mapping = self.resolved_tool_map.get(name)
             if not mapping:
-                return [TextContent(type="text", text=f"Error: Tool '{name}' not found. Use 'request_skill' to unlock tools.")]
-            
-            server_id = mapping["server_id"]
-            original_name = mapping["original_name"]
-            
-            session = await self.process_manager.get_session(server_id)
+                return [TextContent(type="text", text=f"Error: tool '{name}' not found. Use 'request_skill' to unlock tools.")]
+
+            session = await self.process_manager.get_session(mapping["server_id"])
             if not session:
-                return [TextContent(type="text", text=f"Error: Backend '{server_id}' is offline.")]
+                return [TextContent(type="text", text=f"Error: backend '{mapping['server_id']}' is offline.")]
 
             try:
-                result = await session.call_tool(original_name, arguments or {})
+                result = await session.call_tool(mapping["original_name"], arguments or {})
                 return result.content
-            except Exception as e:
-                logger.error(f"Error calling {name} on {server_id}: {e}")
-                return [TextContent(type="text", text=f"Error during execution: {str(e)}")]
+            except Exception as exc:
+                logger.error("Tool call %s failed: %s", name, exc)
+                return [TextContent(type="text", text=f"Error: {exc}")]
+
+    async def _start_backends(self):
+        for server_cfg in self.config.mcp_servers:
+            try:
+                await self.process_manager.register_and_start(server_cfg.model_dump())
+            except Exception as exc:
+                logger.error("Failed to start backend '%s': %s", server_cfg.id, exc)
 
     async def run(self):
-        """Run the hub with graceful shutdown support."""
         await self._start_backends()
-        logger.info("GearCore Hub initialized and ready.")
-        
+        logger.info("GearCore ready (context: %s)", self.config.context_name)
+
+        loop = asyncio.get_running_loop()
+        if sys.platform != "win32":
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(
+                        sig,
+                        lambda: asyncio.create_task(self._shutdown()),
+                    )
+                except NotImplementedError:
+                    pass
+
         async with stdio_server() as (read_stream, write_stream):
             await self.server.run(
                 read_stream,
                 write_stream,
                 InitializationOptions(
                     server_name="gearcore-hub",
-                    server_version="1.0.0",
+                    server_version="2.0.0",
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
@@ -185,36 +186,201 @@ class GearCoreHub:
                 ),
             )
 
-async def shutdown(hub: GearCoreHub):
-    """Gracefully shut down the hub and its backends."""
-    logger.info("Shutting down GearCore Hub...")
-    await hub.process_manager.shutdown_all()
-    logger.info("Shutdown complete.")
+    async def _shutdown(self):
+        logger.info("Shutting down GearCore...")
+        await self.process_manager.shutdown_all()
 
-async def main():
-    config_file = "config/gearcore.yaml"
-    hub = GearCoreHub(config_file)
-    
-    # Handle OS signals for graceful termination
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+
+# ---------------------------------------------------------------------------
+# Status command
+# ---------------------------------------------------------------------------
+
+def cmd_status(config: EffectiveConfig):
+    print(f"\nGearCore — context: {config.context_name}")
+    if config.project_root:
+        print(f"  Project root: {config.project_root}")
+
+    print("\nMCP servers (effective):")
+    for s in config.mcp_servers:
+        addr = s.command if s.type == "stdio" else s.url
+        print(f"  [{s.type}] {s.id} — {addr}")
+
+    print("\nSkills dirs:")
+    for d in config.skills_dirs:
+        print(f"  {d}")
+
+    print("\nDisclosure:")
+    disc = config.disclosure
+    print(f"  strategy: {disc.strategy}")
+    print(f"  core_skills: {disc.core_skills or '(none)'}")
+    print(f"  activation_threshold: {disc.activation_threshold}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="gearcore",
+        description="GearCore — unified skill and MCP hub",
+    )
+    parser.add_argument(
+        "--project", "-p",
+        metavar="PATH",
+        help="Project root containing a .gearcore/ directory. "
+             "Auto-detected from CWD if omitted.",
+    )
+
+    sub = parser.add_subparsers(dest="command")
+
+    # serve (default)
+    sub.add_parser("serve", help="Run the MCP hub (default when no subcommand given)")
+
+    # status / list
+    sub.add_parser("status", help="Show current config and context")
+    sub.add_parser("list", help="Alias for status")
+
+    # add-mcp
+    p_add_mcp = sub.add_parser("add-mcp", help="Register a new MCP server")
+    p_add_mcp.add_argument("--id", required=True)
+    p_add_mcp.add_argument("--type", default="stdio", choices=["stdio", "sse", "http"])
+    p_add_mcp.add_argument("--command", default="")
+    p_add_mcp.add_argument("--args", nargs="*", default=[])
+    p_add_mcp.add_argument("--url", default="")
+    p_add_mcp.add_argument("--env", nargs="*", metavar="KEY=VALUE", default=[])
+    p_add_mcp.add_argument("--scope", default="global", choices=["global", "project"])
+    p_add_mcp.add_argument("--disabled", action="store_true")
+
+    # add-skill
+    p_add_skill = sub.add_parser("add-skill", help="Register a skill bundle directory")
+    p_add_skill.add_argument("path", help="Path to the skill directory (must contain SKILL.md)")
+    p_add_skill.add_argument("--scope", default="global", choices=["global", "project"])
+    p_add_skill.add_argument("--symlink", action="store_true", help="Symlink instead of copy")
+
+    # add-cli
+    p_add_cli = sub.add_parser("add-cli", help="Wrap a CLI program into a skill via CLI-Anything")
+    p_add_cli.add_argument("program", help="Program name or path (e.g. ffmpeg)")
+    p_add_cli.add_argument("--scope", default="global", choices=["global", "project"])
+
+    # remove
+    p_remove = sub.add_parser("remove", help="Remove an MCP server or skill")
+    p_remove.add_argument("type", choices=["mcp", "skill"])
+    p_remove.add_argument("name", help="ID (for mcp) or name (for skill)")
+    p_remove.add_argument("--scope", default="global", choices=["global", "project"])
+
+    # sync
+    p_sync = sub.add_parser("sync", help="Install GearCore self-skill on AI CLI tools")
+    p_sync.add_argument("--tool", nargs="*", metavar="TOOL",
+                        help="Specific tools to target (claude, codex, kimi). Default: auto-detect.")
+    p_sync.add_argument("--dry-run", action="store_true")
+    p_sync.add_argument("--remove", action="store_true", help="Unlink from all tools")
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    project_path = Path(args.project).resolve() if args.project else None
+    config = load_config(project=project_path)
+
+    command = args.command or "serve"
+
+    if command in ("status", "list"):
+        cmd_status(config)
+        return
+
+    if command == "serve":
+        hub = GearCoreHub(config)
         try:
-            # Note: Windows doesn't support add_signal_handler fully
-            # but SIGINT works via KeyboardInterrupt in the main loop
-            if sys.platform != "win32":
-                loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(hub)))
-        except NotImplementedError:
+            asyncio.run(hub.run())
+        except (KeyboardInterrupt, asyncio.CancelledError):
             pass
+        return
 
-    try:
-        await hub.run()
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        pass
-    finally:
-        await shutdown(hub)
+    if command == "add-mcp":
+        from gearcore_hub.registry import add_mcp
+        env = dict(kv.split("=", 1) for kv in (args.env or []) if "=" in kv) or None
+        try:
+            path = add_mcp(
+                id=args.id,
+                type=args.type,
+                command=args.command,
+                args=args.args,
+                url=args.url,
+                env=env,
+                scope=args.scope,
+                project_root=project_path,
+                enabled=not args.disabled,
+            )
+            print(f"Registered MCP server '{args.id}' in {path}")
+        except (ValueError, KeyError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if command == "add-skill":
+        from gearcore_hub.registry import add_skill
+        try:
+            dest = add_skill(
+                source=Path(args.path),
+                scope=args.scope,
+                project_root=project_path,
+                symlink=args.symlink,
+            )
+            print(f"Skill installed at {dest}")
+        except (FileNotFoundError, FileExistsError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if command == "add-cli":
+        from gearcore_hub.registry import add_cli
+        try:
+            dest = add_cli(
+                program=args.program,
+                scope=args.scope,
+                project_root=project_path,
+            )
+            print(f"CLI skill scaffolded at {dest}")
+        except (RuntimeError, FileExistsError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if command == "remove":
+        from gearcore_hub.registry import remove_mcp, remove_skill
+        try:
+            if args.type == "mcp":
+                remove_mcp(args.name, scope=args.scope, project_root=project_path)
+            else:
+                remove_skill(args.name, scope=args.scope, project_root=project_path)
+            print(f"Removed {args.type} '{args.name}'")
+        except (KeyError, FileNotFoundError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if command == "sync":
+        from gearcore_hub.sync import sync
+        results = sync(
+            tools=args.tool,
+            dry_run=args.dry_run,
+            remove=args.remove,
+        )
+        for target, result in results.items():
+            print(f"  {target:12s} {result}")
+        return
+
+    parser.print_help()
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    main()

@@ -1,0 +1,32 @@
+# Example: <project>/.gearcore/config.yaml
+#
+# Place this file at <your_project>/.gearcore/config.yaml
+# GearCore auto-detects it when invoked from within the project directory tree,
+# or explicitly via: gearcore --project <path>
+#
+# Only skills/MCPs listed in the allowlists below will be visible.
+# Project-local skills (.gearcore/skills/) are always included automatically.
+
+version: 2
+
+context:
+  name: "Swarm"
+  description: "Worker orchestration and task dispatch"
+
+scope:
+  mcp_servers:
+    include:
+      - swarm-gateway
+      - filesystem
+
+  skills:
+    include:
+      - swarm-worker
+      - code-ops
+      - memory
+
+# Optional: override global disclosure settings for this project
+disclosure:
+  core_skills:
+    - swarm-worker          # auto-activate on project invocation
+  activation_threshold: 0.90

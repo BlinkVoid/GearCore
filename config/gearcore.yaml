@@ -1,37 +1,61 @@
-hub:
-  disclosure_strategy: semantic
-  host: 127.0.0.1
-  log_level: info
-  port: 8686
-  process_timeout_ms: 3600000
+version: 2
 
-mcp_servers:
-  # Filesystem — restricted to honeycomb workspace
-  - id: filesystem
-    type: stdio
-    command: npx
-    args:
-      - -y
-      - '@modelcontextprotocol/server-filesystem'
-      - E:/workspace/Swarm/honeycomb
-    enabled: true
+registry:
+  mcp_servers:
+    # Filesystem — restricted to local workspace
+    - id: filesystem
+      type: stdio
+      command: npx
+      args:
+        - -y
+        - "@modelcontextprotocol/server-filesystem"
+        - ~/workspace
+      enabled: true
 
-  # Swarm Gateway — worker task queue and registration
-  - id: swarm-gateway
-    type: sse
-    url: http://127.0.0.1:7111/sse
-    enabled: true
+    # Swarm Gateway — worker task queue and registration
+    - id: swarm-gateway
+      type: sse
+      url: http://127.0.0.1:7111/sse
+      enabled: true
+
+    # SampleMemory — persistent tiered memory
+    - id: sample-memory
+      type: stdio
+      command: ~/workspace/SampleMemory/.venv/bin/python
+      args:
+        - -m
+        - src.sample-memory.main
+        - --mode
+        - stdio
+      env:
+        PYTHONPATH: ~/workspace/SampleMemory
+      enabled: false  # enable after SampleMemory venv is rebuilt
+
+    # Playwright — browser automation
+    - id: playwright
+      type: stdio
+      command: npx
+      args:
+        - -y
+        - "@playwright/mcp"
+      enabled: false  # enable when web-research is needed
+
+  skills_dirs:
+    - ~/.config/gearcore/skills   # global user skills
+    - ~/.config/agents/skills     # shared with kimi / other tools
+
+disclosure:
+  strategy: manual
+  activation_threshold: 0.85
+  core_skills: []   # nothing auto-loaded globally — projects set their own core_skills
 
 resolution:
   auto_deduplicate: true
   categories:
     file_io:
-      namespace_prefix: fs_
       preferred: filesystem
       strategy: namespace
-
-skills:
-  directory: ./skills
-  activation_threshold: 0.85
-  core_skills:
-    - swarm-worker
+      namespace_prefix: fs_
+    web_search:
+      preferred: playwright
+      strategy: suppress_others

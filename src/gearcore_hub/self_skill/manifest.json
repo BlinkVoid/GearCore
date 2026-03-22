@@ -1,0 +1,15 @@
+{
+  "name": "gearcore",
+  "version": "2.0.0",
+  "description": "Unified skill and MCP hub. Provides progressive disclosure of tools and skills. Invoke to access the full registered toolset for the current context.",
+  "category": "core",
+  "mcp_servers": [],
+  "activation": {
+    "strategy": "auto",
+    "triggers": ["tools", "skills", "mcp", "capabilities", "gearcore", "hub"]
+  },
+  "command": {
+    "default": ["gearcore"],
+    "with_project": ["gearcore", "--project", "{project_root}"]
+  }
+}
