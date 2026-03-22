@@ -1,0 +1,25 @@
+{
+  "name": "code-ops",
+  "version": "1.0.0",
+  "description": "Filesystem operations for reading, writing, and managing code files.",
+  "category": "development",
+  "mcp_servers": [
+    {
+      "server_id": "filesystem",
+      "tools": [
+        "read_file",
+        "write_file",
+        "create_directory",
+        "list_directory",
+        "move_file",
+        "search_files",
+        "get_file_info",
+        "list_allowed_directories"
+      ]
+    }
+  ],
+  "activation": {
+    "strategy": "manual",
+    "triggers": ["code", "file", "write", "read", "directory", "implement", "build"]
+  }
+}

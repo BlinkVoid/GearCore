@@ -42,8 +42,10 @@ class GearCoreHub:
                 self.config = yaml.safe_load(f)
             
             # Re-initialize managers
-            skills_dir = self.config.get("skills", {}).get("directory", "./skills")
-            self.skill_manager = SkillManager(skills_dir)
+            skills_cfg = self.config.get("skills", {})
+            skills_dir = skills_cfg.get("directory", "./skills")
+            core_skills = skills_cfg.get("core_skills", [])
+            self.skill_manager = SkillManager(skills_dir, core_skills=core_skills)
             self.conflict_resolver = ConflictResolver(self.config.get("resolution", {}))
             
             logger.info(f"Configuration reloaded from {self.config_path}")
