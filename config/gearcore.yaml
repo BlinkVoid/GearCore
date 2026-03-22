@@ -2,34 +2,17 @@ version: 2
 
 registry:
   mcp_servers:
-    # Filesystem — restricted to local workspace
-    - id: filesystem
-      type: stdio
-      command: npx
-      args:
-        - -y
-        - "@modelcontextprotocol/server-filesystem"
-        - ~/workspace
-      enabled: true
-
     # Swarm Gateway — worker task queue and registration
     - id: swarm-gateway
       type: sse
       url: http://127.0.0.1:7111/sse
       enabled: true
 
-    # SampleMemory — persistent tiered memory
+    # SampleMemory — persistent tiered memory (HTTP transport)
     - id: sample-memory
-      type: stdio
-      command: ~/workspace/SampleMemory/.venv/bin/python
-      args:
-        - -m
-        - src.sample-memory.main
-        - --mode
-        - stdio
-      env:
-        PYTHONPATH: ~/workspace/SampleMemory
-      enabled: false  # enable after SampleMemory venv is rebuilt
+      type: http
+      url: http://127.0.0.1:8080/sse
+      enabled: false  # enable when SampleMemory server is running
 
     # Playwright — browser automation
     - id: playwright
@@ -52,10 +35,6 @@ disclosure:
 resolution:
   auto_deduplicate: true
   categories:
-    file_io:
-      preferred: filesystem
-      strategy: namespace
-      namespace_prefix: fs_
     web_search:
       preferred: playwright
       strategy: suppress_others

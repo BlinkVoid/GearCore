@@ -2,16 +2,22 @@
 GearCore CLI entry point.
 
 Subcommands:
-  serve        (default) Run the MCP hub — invoked by AI CLI tools via skill manifest
-  status       Show active servers and loaded skills
-  list         Alias for status
-  add-mcp      Register a new MCP server
-  add-skill    Register a skill bundle
-  add-cli      Wrap a CLI program into a skill via CLI-Anything
-  remove       Remove an MCP server or skill
-  sync         Install/update the GearCore self-skill on AI CLI tools
+  list-skills    Enumerate available skills in the current context
+  request-skill  Print a skill's instructions (SKILL.md)
+  call           Invoke a tool on an MCP backend (stateless, one-shot)
+  serve          Run the MCP hub (fallback for clients without skill support)
+  status         Show active servers and loaded skills
+  list           Alias for status
+  add-mcp        Register a new MCP server
+  add-skill      Register a skill bundle
+  add-cli        Wrap a CLI program into a skill via CLI-Anything
+  remove         Remove an MCP server or skill
+  sync           Install/update the GearCore self-skill on AI CLI tools
 
 Usage:
+  gearcore list-skills [--project <path>]
+  gearcore request-skill <name> [--project <path>]
+  gearcore call <server_id> <tool> ['<json_args>']
   gearcore [--project <path>] [serve]
   gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
   gearcore add-skill <path> [--scope global|project] [--symlink]
@@ -37,7 +43,7 @@ from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
 
 from gearcore_hub.config import load_config, EffectiveConfig
 from gearcore_hub.skill_manager import SkillManager
-from gearcore_hub.process_manager import ProcessManager
+from gearcore_hub.process_manager import ProcessManager, SharedMCPServer
 from gearcore_hub.conflict_resolver import ConflictResolver
 
 logging.basicConfig(
@@ -218,6 +224,108 @@ def cmd_status(config: EffectiveConfig):
 
 
 # ---------------------------------------------------------------------------
+# list-skills command
+# ---------------------------------------------------------------------------
+
+def cmd_list_skills(config: EffectiveConfig):
+    sm = SkillManager(config)
+    skills = sm.list_available_skills()
+    ctx = config.context_name
+    print(f"GearCore skills ({ctx} context):\n")
+    if not skills:
+        print("  (no skills visible in this context)")
+        return
+    for s in skills:
+        tags = []
+        if s["status"] == "active":
+            tags.append("[active]")
+        if s["scope"] == "project":
+            tags.append("[project]")
+        tag_str = " ".join(tags)
+        if tag_str:
+            tag_str = " " + tag_str
+        print(f"  {s['name']}{tag_str} — {s['description']}")
+
+
+# ---------------------------------------------------------------------------
+# request-skill command
+# ---------------------------------------------------------------------------
+
+def cmd_request_skill(config: EffectiveConfig, skill_name: str):
+    sm = SkillManager(config)
+    skill = sm.get_skill(skill_name)
+    if not skill:
+        print(f"Error: skill '{skill_name}' not found or not visible in this context.", file=sys.stderr)
+        sys.exit(1)
+    print(skill.instructions)
+
+    # List required MCP servers so the AI knows what `gearcore call` targets are available
+    if skill.manifest.mcp_servers:
+        print("\n---\n")
+        print("## Available tools (via `gearcore call`)\n")
+        for mcp_entry in skill.manifest.mcp_servers:
+            server_id = mcp_entry.get("server_id", "")
+            tools = mcp_entry.get("tools", [])
+            for tool in tools:
+                print(f"  gearcore call {server_id} {tool} '<json_args>'")
+
+
+# ---------------------------------------------------------------------------
+# call command — stateless MCP tool invocation via CLI
+# ---------------------------------------------------------------------------
+
+def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str):
+    import json as _json
+
+    # Find the server config
+    server_cfg = None
+    for s in config.global_cfg.mcp_servers:
+        if s.id == server_id:
+            server_cfg = s
+            break
+
+    if not server_cfg:
+        print(f"error: server '{server_id}' not found in gearcore config")
+        sys.exit(1)
+
+    if not server_cfg.enabled:
+        print(f"error: server '{server_id}' is disabled in gearcore config")
+        sys.exit(1)
+
+    try:
+        tool_args = _json.loads(args_json) if args_json else {}
+    except _json.JSONDecodeError as exc:
+        print(f"error: invalid JSON arguments: {exc}")
+        sys.exit(1)
+
+    async def _run():
+        server = SharedMCPServer(
+            server_id=server_cfg.id,
+            transport=server_cfg.type,
+            command=server_cfg.command,
+            args=server_cfg.args,
+            url=server_cfg.url,
+            env=server_cfg.env,
+        )
+        try:
+            await server.start()
+            result = await server.session.call_tool(tool, tool_args)
+            for content in result.content:
+                if hasattr(content, "text"):
+                    print(content.text)
+                elif hasattr(content, "data"):
+                    print(content.data)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        print(f"error: {server_id}/{tool} — {exc}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -241,6 +349,19 @@ def build_parser() -> argparse.ArgumentParser:
     # status / list
     sub.add_parser("status", help="Show current config and context")
     sub.add_parser("list", help="Alias for status")
+
+    # list-skills
+    sub.add_parser("list-skills", help="Enumerate available skills in the current context")
+
+    # request-skill
+    p_req_skill = sub.add_parser("request-skill", help="Print a skill's instructions (SKILL.md)")
+    p_req_skill.add_argument("name", help="Skill name to retrieve")
+
+    # call
+    p_call = sub.add_parser("call", help="Invoke a tool on an MCP backend (stateless)")
+    p_call.add_argument("server_id", help="MCP server ID (e.g. swarm-gateway)")
+    p_call.add_argument("tool", help="Tool name to call (e.g. worker_register)")
+    p_call.add_argument("args_json", nargs="?", default="", help="JSON-encoded arguments (default: {})")
 
     # add-mcp
     p_add_mcp = sub.add_parser("add-mcp", help="Register a new MCP server")
@@ -295,6 +416,18 @@ def main():
 
     if command in ("status", "list"):
         cmd_status(config)
+        return
+
+    if command == "list-skills":
+        cmd_list_skills(config)
+        return
+
+    if command == "request-skill":
+        cmd_request_skill(config, args.name)
+        return
+
+    if command == "call":
+        cmd_call(config, args.server_id, args.tool, args.args_json)
         return
 
     if command == "serve":
