@@ -1,84 +1,120 @@
-# GearCore: Conflict Resolution & Deduplication Strategy
+# GearCore: Conflict Resolution (v2)
 
-When multiple MCP servers or Skill Bundles provide overlapping functionality (e.g., two different `search` tools or `read_file` tools), GearCore's **Conflict Resolver** intervenes to maintain context clarity and model performance.
-
----
-
-## 1. The Three-Tier Resolution Logic
-
-GearCore uses a cascading strategy to resolve tool collisions:
-
-### Tier 1: Semantic Deduplication (The "Best-of-Breed" Rule)
-*   **Mechanism**: If two tools have identical or near-identical schemas (e.g., `fetch_url` from two different servers), GearCore suppresses one.
-*   **Configuration**: Defined in the `mcp_servers` configuration in the Hub.
-*   **Example**: Both `brave-search` and `google-search` provide a `search` tool. GearCore only exposes one `search` tool to the client, routing requests to the "Primary" provider.
-
-### Tier 2: Domain-Based Namespacing
-*   **Mechanism**: If two tools do similar things but for different domains, GearCore prefixes them to provide clarity.
-*   **Example**:
-    *   `fs_read_file` (Local File System MCP)
-    *   `git_read_file` (GitHub MCP)
-*   **Benefit**: The model clearly understands the **source** of the data it is accessing.
-
-### Tier 3: The "Expert Router" (Unified Interface)
-*   **Mechanism**: GearCore creates a "Virtual Tool" that hides the complexity of multiple backends.
-*   **Example: `smart_search(query)`**
-    *   GearCore's Hub analyzes the query.
-    *   If the query mentions "local files," it routes to the `ripgrep` MCP.
-    *   If it's a "breaking news" query, it routes to the `brave-search` MCP.
-    *   **Result**: The LLM only sees **one** search tool, reducing context bloat and decision fatigue.
+When multiple MCP backends expose tools with the same name, GearCore's conflict resolver ensures the AI sees a clean, unambiguous toolset.
 
 ---
 
-## 2. Priority Matrix Configuration
+## Resolution Strategies
 
-GearCore uses a `priority_matrix.json` to manage these conflicts centrally.
+### 1. suppress_others
 
-```json
-{
-  "categories": {
-    "file_operations": {
-      "preferred_server": "local-filesystem",
-      "fallback_servers": ["github-mcp", "dropbox-mcp"],
-      "conflict_strategy": "suppress_others"
-    },
-    "web_search": {
-      "preferred_server": "brave-search",
-      "fallback_servers": ["duckduckgo"],
-      "conflict_strategy": "unify",
-      "unified_tool_name": "web_search"
-    },
-    "security_scan": {
-      "preferred_server": "security-hub",
-      "conflict_strategy": "namespace",
-      "namespace_prefix": "sec_"
-    }
-  }
-}
+Only the preferred server's tool is exposed. All others are dropped.
+
+```yaml
+resolution:
+  categories:
+    web_search:
+      preferred: playwright
+      strategy: suppress_others
+```
+
+**Result:** If both `playwright` and `brave-search` offer a `search` tool, only `playwright`'s version appears.
+
+**When to use:** One backend is strictly better for this category and you never want the alternative.
+
+### 2. namespace
+
+Non-preferred tools get a prefix. The preferred tool keeps its original name.
+
+```yaml
+resolution:
+  categories:
+    file_io:
+      preferred: filesystem
+      strategy: namespace
+      namespace_prefix: fs_
+```
+
+**Result:**
+- `filesystem` → `read_file` (unchanged — preferred)
+- `github` → `fs_read_file` (prefixed)
+
+**When to use:** Both tools are useful but serve different domains. The prefix disambiguates.
+
+### 3. unify
+
+A single tool name is exposed, routed to the preferred backend.
+
+```yaml
+resolution:
+  categories:
+    search:
+      preferred: brave-search
+      strategy: unify
+      unified_name: web_search
+```
+
+**Result:** `brave_search` → exposed as `web_search`. Other search tools suppressed.
+
+**When to use:** You want a single canonical name for a capability regardless of backend.
+
+---
+
+## Default Behaviour
+
+Tools not matching any configured category get **server-id namespacing** by default:
+
+```
+server_id: filesystem, tool: read_file  →  filesystem_read_file
+server_id: github, tool: read_file      →  github_read_file
+```
+
+This prevents silent collisions without requiring explicit configuration for every tool.
+
+---
+
+## Category Matching
+
+Categories are matched by tool name against a configurable mapping. The current implementation uses a built-in mapping for common tool names:
+
+| Tool name | Category |
+|-----------|----------|
+| `read_file` | `file_io` |
+| `write_file` | `file_io` |
+| `list_directory` | `file_io` |
+| `search` | `web_search` |
+| `brave_search` | `web_search` |
+
+Tools not in this mapping fall through to default namespacing.
+
+**Known limitation:** This mapping is hardcoded in `conflict_resolver.py`. A future version should move it to the YAML config for extensibility.
+
+---
+
+## Configuration Reference
+
+All resolution config lives in the **global** config only (`~/.config/gearcore/config.yaml`). Project configs cannot override resolution rules.
+
+```yaml
+resolution:
+  auto_deduplicate: true          # enable conflict detection
+
+  categories:
+    <category_name>:
+      preferred: <server_id>      # wins conflicts in this category
+      strategy: suppress_others | namespace | unify
+      namespace_prefix: <prefix>  # for namespace strategy
+      unified_name: <name>        # for unify strategy
 ```
 
 ---
 
-## 3. Handling "Tedious" Definitions (The Proxy Advantage)
+## Routing Map
 
-Because GearCore acts as a **Shared Hub**, you only define your MCP servers **once** in the GearCore configuration. 
+When conflicts are resolved, GearCore maintains an internal `resolved_tool_map` that tracks:
 
-### Current State (Tedious):
-*   Cursor: Manually add 10 MCP servers to `mcp.json`.
-*   Claude Code: Manually add 10 MCP servers to config.
-*   Agent: Manually code 10 MCP clients.
+```
+resolved_name → { server_id, original_name }
+```
 
-### GearCore State (Centralized):
-1.  **Define in GearCore**: Add all 10 servers to `gearcore_config.yaml`.
-2.  **Point Clients to GearCore**:
-    *   Cursor `mcp.json` -> `{"gearcore": {"command": "gearcore-hub", "args": ["--port", "8000"]}}`
-    *   Claude Code -> `mcp add gearcore http://localhost:8000/sse`
-3.  **Result**: All clients immediately gain access to the **Conflict-Resolved, Deduplicated, and Skill-Bundled** toolset.
-
----
-
-## 4. Implementation Roadmap
-
-1.  **Semantic Matcher**: A utility that compares JSON schemas of all connected MCP tools to find overlaps.
-2.  **Virtual Tool Injector**: Logic to create and expose "Smart Tools" (Routers) that delegate to multiple backends.
-3.  **Conflict Dashboard**: A small UI or CLI command (`gearcore status`) that shows which tools are active and which are being suppressed due to conflicts.
+This ensures `call_tool` routes to the correct backend even when tool names have been prefixed or aliased.

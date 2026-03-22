@@ -1,70 +1,166 @@
-# GearCore: Shared Hub Architecture Specification
+# GearCore: Architecture (v2)
 
-## 1. High-Level Topology: The "Shared Hub" Model
+## Overview
 
-Instead of every client (Cursor, Claude Code, CLI) spinning up their own `stdio` instances of the same MCP servers, GearCore acts as a **Centralized Service Manager**. 
+GearCore is a **CLI binary that registers itself as a skill** in AI CLI tools (Claude Code, Codex, Kimi). When invoked, it serves as an MCP hub that aggregates tools from registered backend servers and exposes them through progressive disclosure.
 
-It runs **one universal process** for each MCP server and exposes them via a single local endpoint (SSE or WebSockets) to all consuming clients.
+The key architectural shift from v1: GearCore is **not** an MCP server that clients add to their `mcpServers` config. It is a **skill** that clients discover via their native skill loading mechanism (`SKILL.md` in the skills directory).
+
+---
+
+## System Topology
 
 ```mermaid
 graph TD
-    subgraph Clients [MCP Clients]
-        C1[Cursor]
-        C2[Claude Code]
-        C3[Custom Agent]
+    subgraph "AI CLI Tools"
+        Claude["Claude Code"]
+        Codex["Codex CLI"]
+        Kimi["Kimi CLI"]
     end
 
-    subgraph GearCore [GearCore Hub]
-        ProcessMgr[Shared Process Manager]
-        VirtualServer[Virtual MCP Server Endpoint]
-        Discovery[Progressive Disclosure Engine]
-        ConfigMgr[Dynamic Config Generator]
+    subgraph "Skill Discovery"
+        SelfSkill["~/.config/agents/skills/gearcore/SKILL.md"]
     end
 
-    subgraph SharedBackends [Shared MCP Processes]
-        S1[File System - PID 1234]
-        S2[Web Search - PID 5678]
-        S3[Database - PID 9012]
+    subgraph "GearCore CLI"
+        CLI["gearcore --project <path>"]
+        Config["Layered Config Loader"]
+        SkillMgr["Skill Manager"]
+        ProcMgr["Process Manager"]
+        Resolver["Conflict Resolver"]
     end
 
-    Clients <-->|JSON-RPC| VirtualServer
-    VirtualServer <--> ProcessMgr
-    ProcessMgr --- SharedBackends
+    subgraph "MCP Backends (shared)"
+        FS["filesystem (stdio)"]
+        HIVE["hive-gateway (sse)"]
+        Mem["memcore (stdio)"]
+        PW["playwright (stdio)"]
+    end
+
+    Claude -->|"loads skill"| SelfSkill
+    Codex -->|"loads skill"| SelfSkill
+    Kimi -->|"loads skill"| SelfSkill
+    SelfSkill -->|"invokes"| CLI
+    CLI --> Config
+    Config --> SkillMgr
+    Config --> ProcMgr
+    ProcMgr --> FS
+    ProcMgr --> HIVE
+    ProcMgr --> Mem
+    ProcMgr --> PW
+    SkillMgr --> Resolver
 ```
 
 ---
 
-## 2. Key Architectural Shifts
+## Layered Configuration
 
-### A. Resource Optimization (Single-Instance)
-*   **The Problem:** Currently, if you have 3 clients open, you might have 3 instances of a "heavy" Python-based MCP server running, each consuming 200MB+ of RAM.
-*   **The GearCore Solution:** GearCore launches the process **once**. It then multiplexes requests from multiple clients to that single process. This ensures state consistency (e.g., a "Search Cache" is shared across all clients) and saves significant system resources.
+GearCore loads config in two layers. The project layer narrows scope via allowlists — it can never widen beyond what's in the global registry.
 
-### B. GearCore as a "Virtual MCP Server"
-To the client (Claude Code/Cursor), GearCore looks like **one single, massive MCP server**. 
-*   **Clients connect to:** `http://localhost:XXXX/sse`
-*   **GearCore exposes:** A "Virtual Toolset" that it dynamically constructs by aggregating (and filtering) tools from all active shared backends.
+```
+Built-in defaults
+    ↓
+~/.config/gearcore/config.yaml     (global — all MCPs, all skills)
+    ↓
+<project>/.gearcore/config.yaml    (project — allowlisted subset + locals)
+```
 
-### C. Dynamic Configuration (The "Configurator" Role)
-For clients that don't support dynamic tool discovery well (some require a hard `mcp.json`), GearCore acts as a **Centralized Config Manager**.
-*   It can "Sync" your `mcp.json` across all your dev tools.
-*   It provides a "Registry" that tells clients how to connect to the GearCore Hub.
+**Project detection:** explicit `--project <path>` flag, or auto-detect by walking up from CWD looking for a `.gearcore/` directory.
 
----
+### Effective config assembly
 
-## 3. The "Discovery" Flow (Refined)
-
-The "Progressive Disclosure" now happens at the **Virtual Server** level:
-
-1.  **Initial Handshake:** GearCore returns only a "Bootstrap" toolset to the client.
-2.  **Session Context:** As the user/model works, GearCore monitors the conversation (or accepts explicit `request_skill` calls).
-3.  **Live Updates:** GearCore uses the `notifications/tools/list_changed` method (part of the MCP spec) to tell the client, "Hey, I just found 10 new tools for you!" without requiring a client restart.
+1. Load global config → all registered MCP servers, all skill dirs
+2. If project context present → load project config
+3. Filter global MCP servers through `scope.mcp_servers.include` allowlist
+4. Filter global skills through `scope.skills.include` allowlist
+5. Append project-local skills from `.gearcore/skills/` (always included)
+6. Apply disclosure overrides from project (core_skills, threshold)
 
 ---
 
-## 4. Conflict Resolution & Merging
+## Skill Visibility Model
 
-When multiple shared backends offer the same tool (e.g., `read_file`), GearCore's **Conflict Resolver** performs:
-1.  **Semantic Merging:** If the schemas are identical, it routes to the "Primary" provider.
-2.  **Namespacing:** If they differ, it exposes them as `fs_read_file` and `git_read_file`.
-3.  **Unified Interface:** It can expose a single `smart_read` tool that decides which backend to use based on the file path.
+| Skill source | No project context | In project (allowlisted) | In project (not allowlisted) |
+|---|---|---|---|
+| Global skill | Visible | Visible | **Hidden** |
+| Project-local skill | **Never visible** | **Always visible** | N/A |
+
+Project-local skills don't need allowlisting — their presence in `.gearcore/skills/` implies inclusion.
+
+---
+
+## Progressive Disclosure Flow
+
+```
+AI invokes gearcore
+    ↓
+list_tools → returns only: list_skills, request_skill (bootstrap)
+    ↓
+AI calls list_skills → sees available skills for current context
+    ↓
+AI calls request_skill("code-ops") → SKILL.md injected, tools unlocked
+    ↓
+list_tools → now includes code-ops tools (read_file, write_file, ...)
+```
+
+Tools from MCP backends are **hidden** until the skill that references them is activated. The `is_tool_active()` check gates every tool in the aggregation step.
+
+---
+
+## Process Manager
+
+Manages shared MCP server processes. Each server is started once and multiplexed across all tool calls.
+
+- **stdio transport:** spawns a subprocess with command + args + env
+- **sse transport:** connects to an existing HTTP/SSE endpoint
+- Async lock-protected initialization (idempotent)
+- `AsyncExitStack` for guaranteed cleanup on shutdown
+
+---
+
+## Conflict Resolution
+
+When multiple backends expose tools with the same name:
+
+1. **suppress_others** — only the preferred server's tool is exposed
+2. **namespace** — non-preferred tools get a prefix (e.g. `fs_read_file`)
+3. **unify** — a single tool name routes to the preferred backend
+
+Resolution rules are defined in the global config under `resolution.categories`. Tools not matching any category get default server-id-prefixed namespacing.
+
+---
+
+## Self-Skill & Sync
+
+GearCore includes a self-skill bundle (`src/gearcore_hub/self_skill/`) containing `SKILL.md` and `manifest.json`. The `gearcore sync` command:
+
+1. Copies the self-skill to `~/.config/agents/skills/gearcore/` (canonical)
+2. Creates symlinks from `~/.claude/skills/gearcore/`, `~/.codex/skills/gearcore/`, `~/.kimi/skills/gearcore/`
+
+Kimi natively scans `~/.config/agents/skills/` as its highest-priority user path. Claude and Codex discover via their respective symlinked paths.
+
+---
+
+## CLI-Anything Integration
+
+`gearcore add-cli <program>` wraps a traditional program (ffmpeg, git, etc.) into a skill:
+
+1. Invokes CLI-Anything to generate an interface specification
+2. Scaffolds a skill bundle (SKILL.md + manifest.json) from the output
+3. Places the bundle in the appropriate skills directory
+
+This enables any CLI program to become a progressive-disclosure-gated skill without writing MCP servers.
+
+---
+
+## Module Map
+
+| Module | Responsibility |
+|--------|---------------|
+| `main.py` | CLI argument parser, subcommand dispatch, `GearCoreHub` MCP runtime |
+| `config.py` | `GlobalConfig`, `ProjectConfig`, `EffectiveConfig`, layered loader, project detection |
+| `skill_manager.py` | Two-phase loading (global → local), visibility gating, activation tracking |
+| `process_manager.py` | `SharedMCPServer` lifecycle, `ProcessManager` registry, shutdown |
+| `conflict_resolver.py` | Tool deduplication, namespacing, unification |
+| `registry.py` | `add-mcp`, `add-skill`, `add-cli`, `remove` — config/skill-dir mutations |
+| `sync.py` | Self-skill install, symlink management across AI CLI tools |

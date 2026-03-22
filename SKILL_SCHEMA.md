@@ -1,40 +1,77 @@
-# GearCore: Skill Bundle Schema Specification (V2)
+# GearCore: Skill Bundle Schema (v2)
 
-Aligned with the **Agent Skills Open Standard (agentskills.io)**, GearCore Skill Bundles provide a standardized way to package procedural knowledge, scripts, and MCP tool connectivity.
+Skill bundles are the primary unit of organization in GearCore. Each bundle packages procedural instructions (`SKILL.md`) with optional metadata (`manifest.json`) to define a scoped capability.
 
 ---
 
-## 1. Directory Structure (Standardized)
+## Directory Layout
 
-Each skill resides in its own folder. GearCore follows the `agentskills.io` layout:
-
-```text
+```
 skills/
 └── web-research/
-    ├── SKILL.md          # Primary procedural instructions (The "Brain")
-    ├── manifest.json     # Technical metadata & tool mapping (The "Skeleton")
-    ├── scripts/          # Optional: Executable logic (Python/JS)
-    │   └── validate.py
-    └── resources/        # Optional: Data, templates, or reference docs
+    ├── SKILL.md          # Required — procedural instructions for the AI
+    ├── manifest.json     # Optional — metadata, MCP mappings, activation config
+    ├── scripts/          # Optional — executable hooks (validation, transforms)
+    └── resources/        # Optional — templates, reference data
 ```
+
+A valid skill bundle requires only a `SKILL.md` file. If `manifest.json` is missing, GearCore synthesises a minimal manifest using the directory name.
 
 ---
 
-## 2. The `manifest.json` (V2)
+## SKILL.md
 
-Enhanced to support **Semantic Auto-Activation** and **Script Hooks**.
+The primary file. Contains instructions the AI receives when the skill is activated via `request_skill`.
+
+### Format
+
+```markdown
+---
+name: web-research
+description: Deep web research with source validation
+---
+
+# Web Research
+
+## Overview
+Workflow for high-signal technical research.
+
+## Procedure
+1. Use `browser_navigate` for initial discovery
+2. Take screenshots to verify page content
+3. Extract relevant information
+4. Synthesize with citations
+
+## Constraints
+- Prefer official documentation over community blogs
+- Close browser tabs after extraction
+```
+
+The YAML frontmatter (`name`, `description`) is optional. If present, it takes priority over `manifest.json` fields for tools that read `SKILL.md` directly (e.g. Kimi, Codex).
+
+### Supported skill types
+
+| Type | Description |
+|------|-------------|
+| `standard` | Default. Instructions as prose/steps. |
+| `flow` | Contains a mermaid or d2 flowchart that some tools (Kimi) can execute as a structured workflow. |
+
+---
+
+## manifest.json
+
+Optional metadata file. Used by GearCore for MCP tool mapping, conflict resolution, and activation strategy.
 
 ```json
 {
   "name": "web-research",
   "version": "1.0.0",
-  "description": "Deep web research with source validation and content ingestion.",
+  "description": "Web browsing and research via Playwright browser automation.",
   "category": "research",
   "mcp_servers": [
     {
-      "server_id": "brave-search",
-      "tools": ["brave_search", "brave_local_search"],
-      "alias_prefix": "web_"
+      "server_id": "playwright",
+      "tools": ["browser_navigate", "browser_screenshot", "browser_click", "browser_type"]
     }
   ],
   "scripts": [
@@ -45,64 +82,61 @@ Enhanced to support **Semantic Auto-Activation** and **Script Hooks**.
     }
   ],
   "activation": {
-    "strategy": "semantic",
-    "triggers": ["research", "search", "lookup", "verify"],
-    "priority": 10
+    "strategy": "manual",
+    "triggers": ["web", "browser", "research", "scrape"]
   }
 }
 ```
 
-### Key Enhancements:
-*   **`strategy: semantic`**: GearCore's Hub uses LLM-based intent recognition to **automatically** propose or load this skill when the conversation context matches the `triggers` or `description`.
-*   **`scripts`**: Explicitly defines executable logic that Claude can call via the `code_execution` tool to perform complex validation or data processing locally.
-*   **`priority`**: Helps GearCore's **Conflict Resolver** decide which skill to load if multiple skills match the same intent.
+### Fields
 
----
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Skill identifier (must match directory name by convention) |
+| `version` | string | no | Semver version (default: `1.0.0`) |
+| `description` | string | no | One-line description shown in `list_skills` |
+| `category` | string | no | Grouping label (default: `general`) |
+| `mcp_servers` | list | no | MCP server + tool bindings for progressive disclosure |
+| `scripts` | list | no | Executable hooks (not yet invoked — reserved) |
+| `activation` | dict | no | Activation strategy and trigger keywords |
 
-## 3. The `SKILL.md` (V2)
+#### `mcp_servers[]`
 
-Follows the **Procedural Knowledge** mandate. It must focus on "How" to perform the task.
+Maps this skill to specific tools on specific MCP backends. When the skill is activated, only these tools become visible in `list_tools`.
 
-```markdown
-# Skill: Web Research
-
-## Overview
-A workflow for high-signal technical research.
-
-## Procedure
-1. Use `web_search` for initial discovery.
-2. Evaluate results using the `validate_source` script to filter for high-authority domains.
-3. Ingest selected pages using `web_fetch_url`.
-4. Synthesize with citations.
-
-## Constraints
-- Do not use `web_search` for queries that can be answered with local `read_file`.
-- Prefer official documentation over community blogs.
-
-## Triggers
-- "Research the latest version of..."
-- "Find the documentation for..."
+```json
+{
+  "server_id": "filesystem",
+  "tools": ["read_file", "write_file", "list_directory"]
+}
 ```
 
----
+#### `activation`
 
-## 4. Progressive Disclosure & Resource Management
-
-GearCore manages the context window using a **Three-Tier Loading System**:
-
-1.  **Tier 1: Global Index (Low Token Cost)**
-    *   GearCore sends only the `name` and `description` of all available skills to the client.
-2.  **Tier 2: Semantic Suggestion (Zero User Effort)**
-    *   If the user prompt matches a skill's `triggers`, GearCore sends a notification: *"Skill 'Web Research' is available for this task. Load?"*
-3.  **Tier 3: Active Context (Full Skill Load)**
-    *   Once loaded, the `SKILL.md` instructions and full MCP tool schemas are injected into the active session.
-    *   The **Shared Hub** ensures that the underlying MCP processes are ready to receive calls.
+| Field | Type | Description |
+|-------|------|-------------|
+| `strategy` | string | `manual` (default) — requires explicit `request_skill`. `auto` — loaded automatically as a core skill. `semantic` — reserved for future LLM-based activation. |
+| `triggers` | list[string] | Keywords for future semantic matching |
 
 ---
 
-## 5. Hub Integration: The "Universal Process"
+## Skill Placement
 
-By using the **Shared Hub** model, GearCore ensures:
-*   **Resource Efficiency**: Multiple skills can share the same `brave-search` MCP process.
-*   **Script Safety**: Local scripts are executed in a sandboxed environment managed by the Hub.
-*   **Consistency**: Conflict resolution happens centrally; the client always sees a clean, deduplicated set of tools.
+| Location | Scope | Visibility |
+|----------|-------|------------|
+| `~/.config/gearcore/skills/<name>/` | Global | Always visible (unless filtered by project allowlist) |
+| `~/.config/agents/skills/<name>/` | Global (shared) | Same as above; also discoverable by Kimi natively |
+| `<project>/.gearcore/skills/<name>/` | Project-local | Only visible when GearCore is invoked with this project context |
+
+---
+
+## How Skills Relate to MCP Tools
+
+Skills don't replace MCP tools — they **gate and organize** them:
+
+```
+Skill "code-ops" → activates → filesystem MCP tools (read_file, write_file, ...)
+Skill "memory"   → activates → memcore MCP tools (mem_query, mem_store, ...)
+```
+
+Without skill activation, MCP tools remain registered but invisible to the AI. This is the progressive disclosure mechanism — the AI sees a lean bootstrap toolset and unlocks capabilities on demand.

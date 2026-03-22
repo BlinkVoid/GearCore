@@ -1,121 +1,174 @@
-# GearCore: Centralized Configuration Specification (`gearcore.yaml`)
+# GearCore: Configuration Schema (v2)
 
-This YAML file is the primary interface for managing your MCP servers, skills, and conflict resolution rules. It eliminates the need to manually configure individual clients (Cursor, Claude Code, etc.).
-
----
-
-## 1. Global Settings
-Basic configuration for the GearCore Hub service.
-
-```yaml
-hub:
-  port: 8686
-  host: "127.0.0.1"
-  log_level: "info"
-  # How long to keep a shared MCP process alive without active clients
-  process_timeout_ms: 3600000 
-  # Strategy for progressive disclosure: "manual" or "semantic"
-  disclosure_strategy: "semantic"
-```
+GearCore uses a layered YAML configuration system. The global config is the source of truth for all registrations. Project configs narrow scope via allowlists.
 
 ---
 
-## 2. Managed MCP Servers (Shared Backends)
-Define each MCP server once. GearCore handles the lifecycle and multiplexing.
+## File Locations
 
-```yaml
-mcp_servers:
-  - id: "brave-search"
-    type: "stdio" # or "sse"
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-brave-search"]
-    env:
-      BRAVE_API_KEY: "your-api-key"
-    enabled: true
-
-  - id: "local-fs"
-    type: "stdio"
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "E:/workspace"]
-    enabled: true
-
-  - id: "github-mcp"
-    type: "stdio"
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-github"]
-    env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: "your-pat"
-    enabled: true
-```
+| Layer | Path | Purpose |
+|-------|------|---------|
+| Global | `~/.config/gearcore/config.yaml` | Full registry of MCPs, skill dirs, disclosure rules, resolution rules |
+| Project | `<project>/.gearcore/config.yaml` | Allowlist subset, disclosure overrides, project context metadata |
 
 ---
 
-## 3. Conflict Resolution & Priority Matrix
-Rules for handling overlapping tools across different servers.
+## Global Config (`~/.config/gearcore/config.yaml`)
 
 ```yaml
+version: 2
+
+registry:
+  mcp_servers:
+    - id: filesystem
+      type: stdio                # stdio | sse | http
+      command: npx
+      args:
+        - -y
+        - "@modelcontextprotocol/server-filesystem"
+        - /home/user/workspace
+      env:                       # optional environment variables
+        KEY: value
+      enabled: true              # false to keep registered but not started
+
+    - id: hive-gateway
+      type: sse
+      url: http://127.0.0.1:7111/sse
+      enabled: true
+
+  skills_dirs:
+    - ~/.config/gearcore/skills  # global user skills
+    - ~/.config/agents/skills    # shared with kimi / other tools
+
+disclosure:
+  strategy: manual               # manual | semantic (semantic not yet implemented)
+  activation_threshold: 0.85     # for future semantic activation
+  core_skills: []                # skill names to auto-activate on every session
+
 resolution:
-  # Tier 1: Semantic Deduplication
-  # If schemas match 95%+, only show the preferred server's tool.
   auto_deduplicate: true
-
-  # Tier 2 & 3: Category Priorities
   categories:
-    search:
-      preferred: "brave-search"
-      fallback: ["google-search", "duckduckgo"]
-      strategy: "unify" # Expose as a single 'web_search' tool
-      unified_name: "web_search"
-
     file_io:
-      preferred: "local-fs"
-      strategy: "namespace" # Expose as 'fs_read_file', 'git_read_file', etc.
-      namespace_prefix: "fs_"
-
-    security:
-      preferred: "security-hub"
-      strategy: "suppress_others" # Only show the preferred server's tools
+      preferred: filesystem      # server id that wins conflicts
+      strategy: namespace        # suppress_others | namespace | unify
+      namespace_prefix: fs_      # prefix for non-preferred tools
+    web_search:
+      preferred: playwright
+      strategy: suppress_others
 ```
+
+### Fields
+
+#### `registry.mcp_servers[]`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | yes | Unique identifier for this server |
+| `type` | string | yes | Transport: `stdio`, `sse`, or `http` |
+| `command` | string | stdio only | Command to spawn |
+| `args` | list[string] | no | Arguments to pass to command |
+| `url` | string | sse/http only | Endpoint URL |
+| `env` | dict | no | Environment variables for the process |
+| `enabled` | bool | no | Default `true`. Set `false` to disable without removing |
+
+#### `registry.skills_dirs[]`
+
+List of paths to scan for skill bundles. Supports `~` expansion. Directories are scanned in order; later entries override earlier ones if skill names collide.
+
+#### `disclosure`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `strategy` | string | `manual` | `manual` = explicit `request_skill` only. `semantic` = reserved for future LLM-based activation |
+| `activation_threshold` | float | `0.85` | Reserved for semantic strategy |
+| `core_skills` | list[string] | `[]` | Skills auto-activated at session start |
+
+#### `resolution.categories`
+
+Each category entry controls how conflicting tool names from different servers are resolved.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `preferred` | string | Server id whose tools win conflicts |
+| `strategy` | string | `suppress_others`, `namespace`, or `unify` |
+| `namespace_prefix` | string | Prefix for non-preferred tools (namespace strategy) |
+| `unified_name` | string | Single name to expose (unify strategy) |
 
 ---
 
-## 4. Skill Bundle Discovery
-Tell GearCore where to look for your `agentskills.io` compatible bundles.
+## Project Config (`<project>/.gearcore/config.yaml`)
 
 ```yaml
-skills:
-  directory: "./skills"
-  # Skills to always load by default into every session
+version: 2
+
+context:
+  name: "HIVE"
+  description: "Worker orchestration and task dispatch"
+
+scope:
+  mcp_servers:
+    include:                     # allowlist — only these global servers are visible
+      - hive-gateway
+      - filesystem
+
+  skills:
+    include:                     # allowlist — only these global skills are visible
+      - hive-worker
+      - code-ops
+      - memory
+
+# Optional — overrides global disclosure for this project
+disclosure:
   core_skills:
-    - "system-management"
-    - "context-optimizer"
-  # Automatic loading threshold (0.0 to 1.0) for semantic triggers
-  activation_threshold: 0.85
+    - hive-worker                # auto-activate when this project loads
+  activation_threshold: 0.90
+```
+
+### Fields
+
+#### `context`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Human-readable project name (shown in `gearcore status`) |
+| `description` | string | Optional project description |
+
+#### `scope.mcp_servers.include`
+
+List of MCP server ids from the global registry. Only servers listed here are started and visible when GearCore is invoked with this project context. Omit the `include` key entirely to allow all global servers.
+
+#### `scope.skills.include`
+
+List of skill names from the global registry. Only skills listed here are visible. Omit the `include` key entirely to allow all global skills.
+
+**Project-local skills** (in `.gearcore/skills/`) are always included automatically and do not need to be listed here.
+
+#### `disclosure` (optional)
+
+Same schema as global. When present, completely overrides the global disclosure settings for this project context.
+
+---
+
+## Project Directory Structure
+
+```
+<project>/
+  .gearcore/
+    config.yaml              ← project config (allowlists + overrides)
+    skills/                  ← project-local skill bundles
+      my-custom-skill/
+        SKILL.md
+        manifest.json
 ```
 
 ---
 
-## 5. Client Sync (Optional)
-GearCore can automatically update your local `mcp.json` files for other clients to point them to the Hub.
+## Config Precedence Summary
 
-```yaml
-client_sync:
-  cursor:
-    enabled: true
-    path: "%APPDATA%/Cursor/User/globalStorage/saoudrizwan.claude-dev/settings/mcp.json"
-  claude_code:
-    enabled: true
-    path: "~/.claudecode/config.json"
 ```
-
----
-
-## 6. Usage Flow
-
-1.  **Edit `gearcore.yaml`**: Add a new MCP server or tweak a priority rule.
-2.  **Restart/Reload Hub**: `gearcore-hub --reload`
-3.  **Automatic Propagation**:
-    *   The **Shared Process Manager** spins up the new server.
-    *   The **Conflict Resolver** updates the virtual toolset.
-    *   The **Virtual Server** notifies all connected clients (`Cursor`, `Claude Code`) that the toolset has changed via `list_changed`.
-    *   **Context Optimization**: The actual tool schemas for the new server are hidden from the LLM until a Skill trigger is met.
+Global MCPs       →  filtered by project scope.mcp_servers.include
+Global skills     →  filtered by project scope.skills.include
+Project skills    →  always included when project context present
+Disclosure rules  →  project overrides global if present
+Resolution rules  →  always from global (not overridable per project)
+```
