@@ -21,6 +21,7 @@ scope:
 
   skills:
     include:
+      - first-principles-scientific-mindset
       - swarm-worker
       - code-ops
       - memory
@@ -28,5 +29,6 @@ scope:
 # Optional: override global disclosure settings for this project
 disclosure:
   core_skills:
+    - first-principles-scientific-mindset
     - swarm-worker          # auto-activate on project invocation
   activation_threshold: 0.90
