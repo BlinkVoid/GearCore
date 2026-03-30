@@ -69,6 +69,7 @@ class SkillManager:
         self.config = config
         self.skills: Dict[str, SkillBundle] = {}
         self.active_skills: Set[str] = set()
+        self.broken_skills: Dict[str, str] = {}  # name → broken target path
         self._load()
         self._auto_activate_core()
 
@@ -78,6 +79,7 @@ class SkillManager:
 
     def _load(self):
         self.skills.clear()
+        self.broken_skills.clear()
         project_local_dir: Optional[Path] = None
         if self.config.project_root is not None:
             project_local_dir = self.config.project_root / ".gearcore" / "skills"
@@ -86,10 +88,18 @@ class SkillManager:
             is_local = (project_local_dir is not None and skills_dir == project_local_dir)
             self._scan_dir(skills_dir, is_project_local=is_local)
 
+        if self.broken_skills:
+            logger.warning(
+                "Broken skill symlinks detected (%d): %s",
+                len(self.broken_skills),
+                ", ".join(self.broken_skills),
+            )
+
         logger.info(
-            "Skills loaded: %d total (%d project-local)",
+            "Skills loaded: %d total (%d project-local, %d broken)",
             len(self.skills),
             sum(1 for s in self.skills.values() if s.is_project_local),
+            len(self.broken_skills),
         )
 
     def _scan_dir(self, skills_dir: Path, *, is_project_local: bool):
@@ -98,6 +108,16 @@ class SkillManager:
             return
 
         for skill_path in sorted(skills_dir.iterdir()):
+            # Detect broken symlinks: is_symlink() is True but exists() is False
+            # when the target has been moved or deleted.
+            if skill_path.is_symlink() and not skill_path.exists():
+                target = str(skill_path.resolve())
+                self.broken_skills[skill_path.name] = target
+                logger.warning(
+                    "Broken symlink for skill '%s' → %s (target missing)",
+                    skill_path.name, target,
+                )
+                continue
             if not skill_path.is_dir():
                 continue
             self._load_bundle(skill_path, is_project_local=is_project_local)
@@ -184,7 +204,7 @@ class SkillManager:
 
     def list_available_skills(self) -> List[Dict[str, str]]:
         visible = self.visible_skill_names
-        return [
+        result = [
             {
                 "name": s.manifest.name,
                 "description": s.manifest.description,
@@ -195,6 +215,16 @@ class SkillManager:
             for name, s in self.skills.items()
             if name in visible
         ]
+        # Append broken symlinks so users are aware and can fix them
+        for name, target in self.broken_skills.items():
+            result.append({
+                "name": name,
+                "description": f"BROKEN SYMLINK → {target}",
+                "category": "broken",
+                "scope": "unknown",
+                "status": "broken",
+            })
+        return result
 
     def get_skill(self, name: str) -> Optional[SkillBundle]:
         if name not in self.visible_skill_names:
