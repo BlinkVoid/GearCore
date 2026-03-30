@@ -235,7 +235,9 @@ def cmd_list_skills(config: EffectiveConfig):
     if not skills:
         print("  (no skills visible in this context)")
         return
-    for s in skills:
+    broken = [s for s in skills if s["status"] == "broken"]
+    healthy = [s for s in skills if s["status"] != "broken"]
+    for s in healthy:
         tags = []
         if s["status"] == "active":
             tags.append("[active]")
@@ -245,6 +247,11 @@ def cmd_list_skills(config: EffectiveConfig):
         if tag_str:
             tag_str = " " + tag_str
         print(f"  {s['name']}{tag_str} — {s['description']}")
+    if broken:
+        print(f"\n  BROKEN SYMLINKS ({len(broken)}):")
+        print("  Fix with: gearcore remove <name> && gearcore add-skill --symlink <new-path>")
+        for s in broken:
+            print(f"    {s['name']} → {s['description'].removeprefix('BROKEN SYMLINK → ')}")
 
 
 # ---------------------------------------------------------------------------

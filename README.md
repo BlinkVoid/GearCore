@@ -8,6 +8,7 @@ GearCore is a CLI tool that acts as a single entry point for all your registered
 
 - **Appears as a skill**, not an MCP — AI CLI tools (Claude Code, Codex, Kimi) invoke `gearcore` directly via their native skill discovery
 - **Progressive disclosure** — tools are hidden until a skill is explicitly unlocked via `request_skill`, keeping the context window lean
+- **Core reasoning discipline** — lightweight auto-activated skills can set default reasoning norms without exposing extra tools
 - **Layered config** — global registry at `~/.config/gearcore/config.yaml`, project overrides at `<project>/.gearcore/config.yaml`
 - **Project scoping** — each project allowlists only the skills/MCPs relevant to it; project-local skills live in `.gearcore/skills/`
 - **Conflict resolution** — deduplicates, namespaces, or unifies overlapping tools from multiple MCP servers
@@ -88,20 +89,30 @@ src/gearcore_hub/
 
 | Command | Description |
 |---------|-------------|
-| `gearcore` or `gearcore serve` | Run the MCP hub (invoked by AI tools) |
+| `gearcore list-skills` | List available skills in current context |
+| `gearcore request-skill <name>` | Print a skill's instructions (SKILL.md) |
+| `gearcore call <server> <tool> '<json>'` | Invoke a tool on an MCP backend (stateless) |
 | `gearcore status` | Show effective config and context |
+| `gearcore serve` | Run the MCP hub (fallback for non-skill clients) |
 | `gearcore add-mcp` | Register a new MCP server |
 | `gearcore add-skill <path>` | Register a skill bundle |
 | `gearcore add-cli <program>` | Wrap a CLI via [CLI-Anything](https://github.com/HKUDS/CLI-Anything) |
 | `gearcore remove mcp\|skill <name>` | Remove an MCP or skill |
 | `gearcore sync` | Install self-skill to AI CLI tools |
 
-All registry commands accept `--scope global|project` and `--project <path>`.
+All commands accept `--project <path>` for project-scoped context.
 
 ## Documentation
 
+- [DESIGN_RATIONALE.md](DESIGN_RATIONALE.md) — why skill-first, not MCP-first
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and data flow
 - [CONFIG_SCHEMA.md](CONFIG_SCHEMA.md) — config file specification (global + project)
 - [SKILL_SCHEMA.md](SKILL_SCHEMA.md) — skill bundle format
 - [CONFLICT_RESOLUTION.md](CONFLICT_RESOLUTION.md) — deduplication and namespacing strategy
 - [RESEARCH.md](RESEARCH.md) — background research and problem analysis
+
+## Included Core Skill
+
+`first-principles-scientific-mindset` is included as a zero-tool core skill. It keeps
+default reasoning anchored on deriving from fundamentals, making assumptions explicit,
+forming falsifiable hypotheses, and validating conclusions against evidence.
