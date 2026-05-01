@@ -9,12 +9,12 @@ Symlinked from:      ~/.claude/skills/gearcore/
 Kimi already scans ~/.config/agents/skills/ as its highest-priority user path,
 so no extra step is needed for kimi beyond the canonical install.
 """
+
 from __future__ import annotations
 
 import logging
 import shutil
 from pathlib import Path
-from typing import List, Optional
 
 logger = logging.getLogger("gearcore.sync")
 
@@ -26,8 +26,8 @@ CANONICAL_DIR = Path.home() / ".config" / "agents" / "skills" / "gearcore"
 
 TOOL_LINK_PATHS: dict[str, Path] = {
     "claude": Path.home() / ".claude" / "skills" / "gearcore",
-    "codex":  Path.home() / ".codex"  / "skills" / "gearcore",
-    "kimi":   Path.home() / ".kimi"   / "skills" / "gearcore",
+    "codex": Path.home() / ".codex" / "skills" / "gearcore",
+    "kimi": Path.home() / ".kimi" / "skills" / "gearcore",
 }
 
 # Self-skill source lives next to this file inside the package
@@ -38,7 +38,8 @@ SELF_SKILL_SOURCE = Path(__file__).parent / "self_skill"
 # Detection
 # ---------------------------------------------------------------------------
 
-def _detect_installed_tools() -> List[str]:
+
+def _detect_installed_tools() -> list[str]:
     """Return names of AI CLI tools currently installed on PATH."""
     installed = []
     for tool in TOOL_LINK_PATHS:
@@ -50,6 +51,7 @@ def _detect_installed_tools() -> List[str]:
 # ---------------------------------------------------------------------------
 # Core operations
 # ---------------------------------------------------------------------------
+
 
 def _install_canonical(dry_run: bool = False) -> bool:
     """
@@ -77,7 +79,7 @@ def _install_canonical(dry_run: bool = False) -> bool:
     return True
 
 
-def _link_tool(tool: str, dry_run: bool = False) -> Optional[Path]:
+def _link_tool(tool: str, dry_run: bool = False) -> Path | None:
     """
     Create a symlink from a tool's skills dir to the canonical location.
     Returns the link path, or None if no action was needed.
@@ -116,7 +118,8 @@ def _remove_link(tool: str, dry_run: bool = False) -> bool:
         logger.warning(
             "[%s] %s is a real directory, not a symlink — skipping removal "
             "(remove manually if intended)",
-            tool, link,
+            tool,
+            link,
         )
     return False
 
@@ -138,8 +141,9 @@ def _remove_canonical(dry_run: bool = False) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def sync(
-    tools: Optional[List[str]] = None,
+    tools: list[str] | None = None,
     dry_run: bool = False,
     remove: bool = False,
 ) -> dict[str, str]:
@@ -178,7 +182,7 @@ def sync(
             "Use --tool <name> to force install."
         )
 
-    results: dict[str, str] = {}
+    results = {}
 
     # 1. Install canonical
     ok = _install_canonical(dry_run=dry_run)

@@ -9,12 +9,13 @@ Visibility rules:
   - Global skills: visible always; when project context present, only if in allowlist
   - Project-local skills: invisible with no project context; always visible with project context
 """
+
 from __future__ import annotations
 
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Any
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -27,14 +28,15 @@ logger = logging.getLogger("gearcore.skill_manager")
 # Models
 # ---------------------------------------------------------------------------
 
+
 class SkillManifest(BaseModel):
     name: str
     version: str = "1.0.0"
     description: str = ""
     category: str = "general"
-    mcp_servers: List[Dict[str, Any]] = []
-    scripts: Optional[List[Dict[str, Any]]] = []
-    activation: Dict[str, Any] = {}
+    mcp_servers: list[dict[str, Any]] = []
+    scripts: list[dict[str, Any]] | None = []
+    activation: dict[str, Any] = {}
 
 
 class SkillBundle:
@@ -56,6 +58,7 @@ class SkillBundle:
 # Manager
 # ---------------------------------------------------------------------------
 
+
 class SkillManager:
     """
     Loads and gates skills based on EffectiveConfig.
@@ -67,9 +70,9 @@ class SkillManager:
 
     def __init__(self, config: EffectiveConfig):
         self.config = config
-        self.skills: Dict[str, SkillBundle] = {}
-        self.active_skills: Set[str] = set()
-        self.broken_skills: Dict[str, str] = {}  # name → broken target path
+        self.skills: dict[str, SkillBundle] = {}
+        self.active_skills: set[str] = set()
+        self.broken_skills: dict[str, str] = {}  # name → broken target path
         self._load()
         self._auto_activate_core()
 
@@ -80,12 +83,12 @@ class SkillManager:
     def _load(self):
         self.skills.clear()
         self.broken_skills.clear()
-        project_local_dir: Optional[Path] = None
+        project_local_dir: Path | None = None
         if self.config.project_root is not None:
             project_local_dir = self.config.project_root / ".gearcore" / "skills"
 
         for skills_dir in self.config.skills_dirs:
-            is_local = (project_local_dir is not None and skills_dir == project_local_dir)
+            is_local = project_local_dir is not None and skills_dir == project_local_dir
             self._scan_dir(skills_dir, is_project_local=is_local)
 
         if self.broken_skills:
@@ -115,7 +118,8 @@ class SkillManager:
                 self.broken_skills[skill_path.name] = target
                 logger.warning(
                     "Broken symlink for skill '%s' → %s (target missing)",
-                    skill_path.name, target,
+                    skill_path.name,
+                    target,
                 )
                 continue
             if not skill_path.is_dir():
@@ -131,7 +135,7 @@ class SkillManager:
         manifest_file = skill_path / "manifest.json"
         if manifest_file.exists():
             try:
-                with open(manifest_file, "r", encoding="utf-8") as f:
+                with open(manifest_file, encoding="utf-8") as f:
                     manifest = SkillManifest(**json.load(f))
             except Exception as exc:
                 logger.error("Bad manifest at %s: %s", manifest_file, exc)
@@ -152,7 +156,11 @@ class SkillManager:
             is_project_local=is_project_local,
         )
         self.skills[manifest.name] = bundle
-        logger.debug("Loaded %sskill: %s", "project-local " if is_project_local else "", manifest.name)
+        logger.debug(
+            "Loaded %sskill: %s",
+            "project-local " if is_project_local else "",
+            manifest.name,
+        )
 
     def _auto_activate_core(self):
         for name in self.config.disclosure.core_skills:
@@ -165,7 +173,7 @@ class SkillManager:
     # ------------------------------------------------------------------
 
     @property
-    def visible_skill_names(self) -> Set[str]:
+    def visible_skill_names(self) -> set[str]:
         """
         Names the current context is allowed to see.
 
@@ -173,7 +181,7 @@ class SkillManager:
         - With project + allowlist: only allowlisted globals + all project-locals
         - With project + no allowlist key: all globals + all project-locals
         """
-        result: Set[str] = set()
+        result: set[str] = set()
         allowlist = self.config.global_skill_allowlist  # None = allow all
 
         for name, bundle in self.skills.items():
@@ -202,7 +210,7 @@ class SkillManager:
                 self.active_skills.add(name)
         self._auto_activate_core()
 
-    def list_available_skills(self) -> List[Dict[str, str]]:
+    def list_available_skills(self) -> list[dict[str, str]]:
         visible = self.visible_skill_names
         result = [
             {
@@ -210,23 +218,27 @@ class SkillManager:
                 "description": s.manifest.description,
                 "category": s.manifest.category,
                 "scope": "project" if s.is_project_local else "global",
-                "status": "active" if s.manifest.name in self.active_skills else "available",
+                "status": "active"
+                if s.manifest.name in self.active_skills
+                else "available",
             }
             for name, s in self.skills.items()
             if name in visible
         ]
         # Append broken symlinks so users are aware and can fix them
         for name, target in self.broken_skills.items():
-            result.append({
-                "name": name,
-                "description": f"BROKEN SYMLINK → {target}",
-                "category": "broken",
-                "scope": "unknown",
-                "status": "broken",
-            })
+            result.append(
+                {
+                    "name": name,
+                    "description": f"BROKEN SYMLINK → {target}",
+                    "category": "broken",
+                    "scope": "unknown",
+                    "status": "broken",
+                }
+            )
         return result
 
-    def get_skill(self, name: str) -> Optional[SkillBundle]:
+    def get_skill(self, name: str) -> SkillBundle | None:
         if name not in self.visible_skill_names:
             return None
         return self.skills.get(name)
@@ -245,7 +257,8 @@ class SkillManager:
             if bundle is None:
                 continue
             for mcp_entry in bundle.manifest.mcp_servers:
-                if mcp_entry.get("server_id") == server_id:
-                    if tool_name in mcp_entry.get("tools", []):
-                        return True
+                if mcp_entry.get(
+                    "server_id"
+                ) == server_id and tool_name in mcp_entry.get("tools", []):
+                    return True
         return False

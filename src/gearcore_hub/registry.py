@@ -7,15 +7,14 @@ Pass scope="project" + project_root to target the project's .gearcore/config.yam
 Note: add-cli requires CLI-Anything (https://github.com/HKUDS/CLI-Anything) to be
 installed and available on PATH as `cli-anything`.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import shutil
 import subprocess
-import sys
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import yaml
 
@@ -27,9 +26,10 @@ logger = logging.getLogger("gearcore.registry")
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _read_yaml(path: Path) -> dict:
     if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     return {}
 
@@ -37,18 +37,22 @@ def _read_yaml(path: Path) -> dict:
 def _write_yaml(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        yaml.dump(
+            data, f, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
 
 
-def _config_path(scope: str, project_root: Optional[Path]) -> Path:
+def _config_path(scope: str, project_root: Path | None) -> Path:
     if scope == "project":
         if project_root is None:
-            raise ValueError("--scope project requires a project root (use --project <path>)")
+            raise ValueError(
+                "--scope project requires a project root (use --project <path>)"
+            )
         return project_root / ".gearcore" / "config.yaml"
     return GLOBAL_CONFIG_PATH
 
 
-def _skills_dir(scope: str, project_root: Optional[Path]) -> Path:
+def _skills_dir(scope: str, project_root: Path | None) -> Path:
     if scope == "project":
         if project_root is None:
             raise ValueError("--scope project requires a project root")
@@ -60,15 +64,16 @@ def _skills_dir(scope: str, project_root: Optional[Path]) -> Path:
 # add-mcp
 # ---------------------------------------------------------------------------
 
+
 def add_mcp(
     id: str,
     type: str,
     command: str = "",
-    args: Optional[List[str]] = None,
+    args: list[str] | None = None,
     url: str = "",
-    env: Optional[Dict[str, str]] = None,
+    env: dict[str, str] | None = None,
     scope: str = "global",
-    project_root: Optional[Path] = None,
+    project_root: Path | None = None,
     enabled: bool = True,
 ) -> Path:
     """
@@ -119,10 +124,11 @@ def add_mcp(
 # add-skill
 # ---------------------------------------------------------------------------
 
+
 def add_skill(
     source: Path,
     scope: str = "global",
-    project_root: Optional[Path] = None,
+    project_root: Path | None = None,
     symlink: bool = False,
 ) -> Path:
     """
@@ -162,11 +168,12 @@ def add_skill(
 # add-cli (CLI-Anything integration)
 # ---------------------------------------------------------------------------
 
+
 def add_cli(
     program: str,
     scope: str = "global",
-    project_root: Optional[Path] = None,
-    cli_anything_args: Optional[List[str]] = None,
+    project_root: Path | None = None,
+    cli_anything_args: list[str] | None = None,
 ) -> Path:
     """
     Wrap a traditional CLI program into a GearCore skill via CLI-Anything.
@@ -192,9 +199,7 @@ def add_cli(
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
-        raise RuntimeError(
-            f"cli-anything failed for '{program}':\n{result.stderr}"
-        )
+        raise RuntimeError(f"cli-anything failed for '{program}':\n{result.stderr}")
 
     # cli-anything is expected to produce JSON describing the interface
     try:
@@ -240,19 +245,19 @@ def add_cli(
 
     skill_md = f"""---
 name: {skill_name}
-description: {manifest['description']}
+description: {manifest["description"]}
 ---
 
 # {skill_name}
 
-{manifest['description']}
+{manifest["description"]}
 
 ## Usage
 
 Invoke via shell command: `{program}`
 
 ## Commands
-{commands_section if commands_section else '_Run `' + program + ' --help` for available commands._'}
+{commands_section if commands_section else "_Run `" + program + " --help` for available commands._"}
 
 ## Notes
 
@@ -269,7 +274,10 @@ Invoke via shell command: `{program}`
 # remove
 # ---------------------------------------------------------------------------
 
-def remove_mcp(id: str, scope: str = "global", project_root: Optional[Path] = None) -> Path:
+
+def remove_mcp(
+    id: str, scope: str = "global", project_root: Path | None = None
+) -> Path:
     """Remove an MCP server entry from config."""
     cfg_path = _config_path(scope, project_root)
     data = _read_yaml(cfg_path)
@@ -294,7 +302,7 @@ def remove_mcp(id: str, scope: str = "global", project_root: Optional[Path] = No
 def remove_skill(
     name: str,
     scope: str = "global",
-    project_root: Optional[Path] = None,
+    project_root: Path | None = None,
 ) -> Path:
     """Delete a skill bundle directory from the skills dir."""
     dest = _skills_dir(scope, project_root) / name

@@ -26,28 +26,28 @@ Usage:
   gearcore sync [--tool claude|codex|kimi] [--dry-run] [--remove]
   gearcore status
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
-import signal
 import sys
 from pathlib import Path
-from typing import List, Optional
 
-from mcp.server import Server, NotificationOptions
+from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
+from mcp.types import TextContent, Tool
 
-from gearcore_hub.config import load_config, EffectiveConfig
-from gearcore_hub.skill_manager import SkillManager
-from gearcore_hub.process_manager import ProcessManager, SharedMCPServer
+from gearcore_hub.config import EffectiveConfig, load_config
 from gearcore_hub.conflict_resolver import ConflictResolver
+from gearcore_hub.process_manager import ProcessManager, SharedMCPServer
+from gearcore_hub.skill_manager import SkillManager
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
     stream=sys.stderr,
 )
@@ -57,6 +57,7 @@ logger = logging.getLogger("gearcore")
 # ---------------------------------------------------------------------------
 # Serve command — the MCP hub runtime
 # ---------------------------------------------------------------------------
+
 
 class GearCoreHub:
     def __init__(self, config: EffectiveConfig):
@@ -70,7 +71,7 @@ class GearCoreHub:
 
     def _setup_handlers(self):
         @self.server.list_tools()
-        async def handle_list_tools() -> List[Tool]:
+        async def handle_list_tools() -> list[Tool]:
             all_tools = [
                 Tool(
                     name="list_skills",
@@ -83,7 +84,10 @@ class GearCoreHub:
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "description": "Skill name to unlock."}
+                            "name": {
+                                "type": "string",
+                                "description": "Skill name to unlock.",
+                            }
                         },
                         "required": ["name"],
                     },
@@ -94,31 +98,31 @@ class GearCoreHub:
             for server_id, server in self.process_manager.servers.items():
                 if server.session:
                     try:
-                        resp = await server.session.list_tools()
+                        resp = await asyncio.wait_for(
+                            server.session.list_tools(), timeout=10.0
+                        )
                         for tool in resp.tools:
                             if self.skill_manager.is_tool_active(server_id, tool.name):
-                                aggregated_raw.append({
-                                    "server_id": server_id,
-                                    "tool": tool,
-                                    "original_name": tool.name,
-                                })
+                                aggregated_raw.append(
+                                    {
+                                        "server_id": server_id,
+                                        "tool": tool,
+                                        "original_name": tool.name,
+                                    }
+                                )
+                    except TimeoutError:
+                        logger.warning("list_tools timed out for %s", server_id)
                     except Exception as exc:
                         logger.error("list_tools failed for %s: %s", server_id, exc)
 
-            resolved = self.conflict_resolver.resolve(aggregated_raw)
+            resolved_tools, tool_map = self.conflict_resolver.resolve(aggregated_raw)
             self.resolved_tool_map.clear()
-            for entry in aggregated_raw:
-                self.resolved_tool_map[entry["tool"].name] = {
-                    "server_id": entry["server_id"],
-                    "original_name": entry["original_name"],
-                }
-            all_tools.extend(resolved)
+            self.resolved_tool_map.update(tool_map)
+            all_tools.extend(resolved_tools)
             return all_tools
 
         @self.server.call_tool()
-        async def handle_call_tool(
-            name: str, arguments: dict | None
-        ) -> List[TextContent | ImageContent | EmbeddedResource]:
+        async def handle_call_tool(name: str, arguments: dict | None):
 
             if name == "list_skills":
                 skills = self.skill_manager.list_available_skills()
@@ -133,25 +137,52 @@ class GearCoreHub:
             if name == "request_skill":
                 skill_name = (arguments or {}).get("name", "")
                 if not skill_name:
-                    return [TextContent(type="text", text="Error: missing 'name' argument.")]
+                    return [
+                        TextContent(type="text", text="Error: missing 'name' argument.")
+                    ]
                 skill = self.skill_manager.get_skill(skill_name)
                 if not skill:
-                    return [TextContent(type="text", text=f"Error: skill '{skill_name}' not found or not visible in this context.")]
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Error: skill '{skill_name}' not found or not visible in this context.",
+                        )
+                    ]
                 self.skill_manager.activate_skill(skill_name)
                 text = f"### SKILL LOADED: {skill_name}\n\n{skill.instructions}\n\nTools for '{skill_name}' are now available."
                 return [TextContent(type="text", text=text)]
 
             mapping = self.resolved_tool_map.get(name)
             if not mapping:
-                return [TextContent(type="text", text=f"Error: tool '{name}' not found. Use 'request_skill' to unlock tools.")]
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Error: tool '{name}' not found. Use 'request_skill' to unlock tools.",
+                    )
+                ]
 
             session = await self.process_manager.get_session(mapping["server_id"])
             if not session:
-                return [TextContent(type="text", text=f"Error: backend '{mapping['server_id']}' is offline.")]
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Error: backend '{mapping['server_id']}' is offline.",
+                    )
+                ]
 
             try:
-                result = await session.call_tool(mapping["original_name"], arguments or {})
+                result = await asyncio.wait_for(
+                    session.call_tool(mapping["original_name"], arguments or {}),
+                    timeout=60.0,
+                )
                 return result.content
+            except TimeoutError:
+                logger.error("Tool call %s timed out after 60s", name)
+                return [
+                    TextContent(
+                        type="text", text="Error: Tool call timed out after 60 seconds."
+                    )
+                ]
             except Exception as exc:
                 logger.error("Tool call %s failed: %s", name, exc)
                 return [TextContent(type="text", text=f"Error: {exc}")]
@@ -159,7 +190,12 @@ class GearCoreHub:
     async def _start_backends(self):
         for server_cfg in self.config.mcp_servers:
             try:
-                await self.process_manager.register_and_start(server_cfg.model_dump())
+                await asyncio.wait_for(
+                    self.process_manager.register_and_start(server_cfg.model_dump()),
+                    timeout=15.0,
+                )
+            except TimeoutError:
+                logger.error("Backend '%s' failed to start within 15s", server_cfg.id)
             except Exception as exc:
                 logger.error("Failed to start backend '%s': %s", server_cfg.id, exc)
 
@@ -167,30 +203,29 @@ class GearCoreHub:
         await self._start_backends()
         logger.info("GearCore ready (context: %s)", self.config.context_name)
 
-        loop = asyncio.get_running_loop()
-        if sys.platform != "win32":
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                try:
-                    loop.add_signal_handler(
-                        sig,
-                        lambda: asyncio.create_task(self._shutdown()),
-                    )
-                except NotImplementedError:
-                    pass
-
-        async with stdio_server() as (read_stream, write_stream):
-            await self.server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="gearcore-hub",
-                    server_version="2.0.0",
-                    capabilities=self.server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                await self.server.run(
+                    read_stream,
+                    write_stream,
+                    InitializationOptions(
+                        server_name="gearcore-hub",
+                        server_version="2.1.0",
+                        capabilities=self.server.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={},
+                        ),
                     ),
-                ),
-            )
+                )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                await asyncio.shield(self._shutdown())
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.error("Shutdown error: %s", exc)
 
     async def _shutdown(self):
         logger.info("Shutting down GearCore...")
@@ -200,6 +235,7 @@ class GearCoreHub:
 # ---------------------------------------------------------------------------
 # Status command
 # ---------------------------------------------------------------------------
+
 
 def cmd_status(config: EffectiveConfig):
     print(f"\nGearCore — context: {config.context_name}")
@@ -227,6 +263,7 @@ def cmd_status(config: EffectiveConfig):
 # list-skills command
 # ---------------------------------------------------------------------------
 
+
 def cmd_list_skills(config: EffectiveConfig):
     sm = SkillManager(config)
     skills = sm.list_available_skills()
@@ -249,20 +286,28 @@ def cmd_list_skills(config: EffectiveConfig):
         print(f"  {s['name']}{tag_str} — {s['description']}")
     if broken:
         print(f"\n  BROKEN SYMLINKS ({len(broken)}):")
-        print("  Fix with: gearcore remove <name> && gearcore add-skill --symlink <new-path>")
+        print(
+            "  Fix with: gearcore remove <name> && gearcore add-skill --symlink <new-path>"
+        )
         for s in broken:
-            print(f"    {s['name']} → {s['description'].removeprefix('BROKEN SYMLINK → ')}")
+            print(
+                f"    {s['name']} → {s['description'].removeprefix('BROKEN SYMLINK → ')}"
+            )
 
 
 # ---------------------------------------------------------------------------
 # request-skill command
 # ---------------------------------------------------------------------------
 
+
 def cmd_request_skill(config: EffectiveConfig, skill_name: str):
     sm = SkillManager(config)
     skill = sm.get_skill(skill_name)
     if not skill:
-        print(f"Error: skill '{skill_name}' not found or not visible in this context.", file=sys.stderr)
+        print(
+            f"Error: skill '{skill_name}' not found or not visible in this context.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     print(skill.instructions)
 
@@ -281,12 +326,13 @@ def cmd_request_skill(config: EffectiveConfig, skill_name: str):
 # call command — stateless MCP tool invocation via CLI
 # ---------------------------------------------------------------------------
 
+
 def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str):
     import json as _json
 
-    # Find the server config
+    # Find the server config (use effective config to respect project scope)
     server_cfg = None
-    for s in config.global_cfg.mcp_servers:
+    for s in config.mcp_servers:
         if s.id == server_id:
             server_cfg = s
             break
@@ -295,6 +341,7 @@ def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str)
         print(f"error: server '{server_id}' not found in gearcore config")
         sys.exit(1)
 
+    # config.mcp_servers already filters to enabled servers, but double-check
     if not server_cfg.enabled:
         print(f"error: server '{server_id}' is disabled in gearcore config")
         sys.exit(1)
@@ -336,16 +383,24 @@ def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str)
 # Argument parser
 # ---------------------------------------------------------------------------
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gearcore",
         description="GearCore — unified skill and MCP hub",
     )
     parser.add_argument(
-        "--project", "-p",
+        "--project",
+        "-p",
         metavar="PATH",
         help="Project root containing a .gearcore/ directory. "
-             "Auto-detected from CWD if omitted.",
+        "Auto-detected from CWD if omitted.",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging (DEBUG level).",
     )
 
     sub = parser.add_subparsers(dest="command")
@@ -358,17 +413,23 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="Alias for status")
 
     # list-skills
-    sub.add_parser("list-skills", help="Enumerate available skills in the current context")
+    sub.add_parser(
+        "list-skills", help="Enumerate available skills in the current context"
+    )
 
     # request-skill
-    p_req_skill = sub.add_parser("request-skill", help="Print a skill's instructions (SKILL.md)")
+    p_req_skill = sub.add_parser(
+        "request-skill", help="Print a skill's instructions (SKILL.md)"
+    )
     p_req_skill.add_argument("name", help="Skill name to retrieve")
 
     # call
     p_call = sub.add_parser("call", help="Invoke a tool on an MCP backend (stateless)")
     p_call.add_argument("server_id", help="MCP server ID (e.g. hive-gateway)")
     p_call.add_argument("tool", help="Tool name to call (e.g. worker_register)")
-    p_call.add_argument("args_json", nargs="?", default="", help="JSON-encoded arguments (default: {})")
+    p_call.add_argument(
+        "args_json", nargs="?", default="", help="JSON-encoded arguments (default: {})"
+    )
 
     # add-mcp
     p_add_mcp = sub.add_parser("add-mcp", help="Register a new MCP server")
@@ -383,12 +444,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     # add-skill
     p_add_skill = sub.add_parser("add-skill", help="Register a skill bundle directory")
-    p_add_skill.add_argument("path", help="Path to the skill directory (must contain SKILL.md)")
+    p_add_skill.add_argument(
+        "path", help="Path to the skill directory (must contain SKILL.md)"
+    )
     p_add_skill.add_argument("--scope", default="global", choices=["global", "project"])
-    p_add_skill.add_argument("--symlink", action="store_true", help="Symlink instead of copy")
+    p_add_skill.add_argument(
+        "--symlink", action="store_true", help="Symlink instead of copy"
+    )
 
     # add-cli
-    p_add_cli = sub.add_parser("add-cli", help="Wrap a CLI program into a skill via CLI-Anything")
+    p_add_cli = sub.add_parser(
+        "add-cli", help="Wrap a CLI program into a skill via CLI-Anything"
+    )
     p_add_cli.add_argument("program", help="Program name or path (e.g. ffmpeg)")
     p_add_cli.add_argument("--scope", default="global", choices=["global", "project"])
 
@@ -400,8 +467,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # sync
     p_sync = sub.add_parser("sync", help="Install GearCore self-skill on AI CLI tools")
-    p_sync.add_argument("--tool", nargs="*", metavar="TOOL",
-                        help="Specific tools to target (claude, codex, kimi). Default: auto-detect.")
+    p_sync.add_argument(
+        "--tool",
+        nargs="*",
+        metavar="TOOL",
+        help="Specific tools to target (claude, codex, kimi). Default: auto-detect.",
+    )
     p_sync.add_argument("--dry-run", action="store_true")
     p_sync.add_argument("--remove", action="store_true", help="Unlink from all tools")
 
@@ -412,9 +483,14 @@ def build_parser() -> argparse.ArgumentParser:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Verbose logging enabled")
 
     project_path = Path(args.project).resolve() if args.project else None
     config = load_config(project=project_path)
@@ -439,14 +515,13 @@ def main():
 
     if command == "serve":
         hub = GearCoreHub(config)
-        try:
+        with contextlib.suppress(KeyboardInterrupt):
             asyncio.run(hub.run())
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            pass
         return
 
     if command == "add-mcp":
         from gearcore_hub.registry import add_mcp
+
         env = dict(kv.split("=", 1) for kv in (args.env or []) if "=" in kv) or None
         try:
             path = add_mcp(
@@ -468,6 +543,7 @@ def main():
 
     if command == "add-skill":
         from gearcore_hub.registry import add_skill
+
         try:
             dest = add_skill(
                 source=Path(args.path),
@@ -483,6 +559,7 @@ def main():
 
     if command == "add-cli":
         from gearcore_hub.registry import add_cli
+
         try:
             dest = add_cli(
                 program=args.program,
@@ -497,6 +574,7 @@ def main():
 
     if command == "remove":
         from gearcore_hub.registry import remove_mcp, remove_skill
+
         try:
             if args.type == "mcp":
                 remove_mcp(args.name, scope=args.scope, project_root=project_path)
@@ -510,6 +588,7 @@ def main():
 
     if command == "sync":
         from gearcore_hub.sync import sync
+
         results = sync(
             tools=args.tool,
             dry_run=args.dry_run,
