@@ -1,118 +1,261 @@
 # GearCore
 
-**Unified skill and MCP hub with progressive disclosure and project-scoped context.**
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-1.26+-green.svg)](https://modelcontextprotocol.io)
 
-GearCore is a CLI tool that acts as a single entry point for all your registered MCP servers and skill bundles. Instead of copying the same MCP config into Claude, Codex, and Kimi, you register everything once in GearCore and expose it as a single skill that all three tools discover natively.
+**One skill to rule them all.**
 
-## Key Ideas
+GearCore is a unified skill and MCP hub that aggregates all your AI tools behind a single, progressively-disclosed interface. Instead of copying the same MCP server configs into Claude, Codex, Kimi, and every new project, you register everything **once** in GearCore and expose it as one native skill that every AI CLI tool discovers automatically.
 
-- **Appears as a skill**, not an MCP — AI CLI tools (Claude Code, Codex, Kimi) invoke `gearcore` directly via their native skill discovery
-- **Progressive disclosure** — tools are hidden until a skill is explicitly unlocked via `request_skill`, keeping the context window lean
-- **Core reasoning discipline** — lightweight auto-activated skills can set default reasoning norms without exposing extra tools
-- **Layered config** — global registry at `~/.config/gearcore/config.yaml`, project overrides at `<project>/.gearcore/config.yaml`
-- **Project scoping** — each project allowlists only the skills/MCPs relevant to it; project-local skills live in `.gearcore/skills/`
-- **Conflict resolution** — deduplicates, namespaces, or unifies overlapping tools from multiple MCP servers
+```
+┌─────────────────────────────────────────────────────────────┐
+│  BEFORE: Context window bloat                               │
+│                                                             │
+│  Claude: 12 MCP servers × 200 tokens each = 2,400 tokens   │
+│  Kimi:   Same 12 configs, copied again                     │
+│  Codex:  Same 12 configs, copied again                     │
+│  Every project: repeat                                     │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│  AFTER: GearCore                                            │
+│                                                             │
+│  Claude → gearcore skill → request_skill("web-research")   │
+│  Kimi   → gearcore skill → request_skill("filesystem")     │
+│  Codex  → gearcore skill → request_skill("memory")         │
+│                                                             │
+│  Tools hidden until needed. Context window stays lean.     │
+└─────────────────────────────────────────────────────────────┘
+```
 
-## Install
+## Features
+
+- **🎭 Appears as a native skill** — AI tools invoke `gearcore` directly via their skill discovery. No MCP config duplication.
+- **🔒 Progressive disclosure** — Tools stay hidden until you explicitly unlock a skill via `request_skill`. Your context window stays clean.
+- **📁 Project scoping** — Each project can allowlist only the skills it needs via `.gearcore/config.yaml`.
+- **🧠 Core reasoning discipline** — Auto-activated zero-tool skills (like `first-principles-scientific-mindset`) set default reasoning norms without adding tool noise.
+- **⚔️ Conflict resolution** — When multiple MCP servers expose the same tool name, GearCore deduplicates, namespaces, or unifies them automatically.
+- **🔄 One sync to all tools** — `gearcore sync` installs the self-skill into Claude, Codex, and Kimi in one command.
+
+## Installation
+
+Requires **Python 3.13+** and **[uv](https://docs.astral.sh/uv/)**.
 
 ```bash
-# Requires Python 3.13+ and uv
+# Install the CLI
+uv tool install git+https://github.com/yourusername/gearcore
+
+# Or install from local source
 uv tool install /path/to/GearCore
 
-# Install the self-skill to all detected AI CLI tools
+# Install the self-skill into Claude, Codex, Kimi
 gearcore sync
 ```
 
 ## Quick Start
 
+### 1. Check your setup
+
 ```bash
-# Check effective config
 gearcore status
-
-# Register an MCP server
-gearcore add-mcp --id filesystem --type stdio --command npx --args -y @modelcontextprotocol/server-filesystem /home/user/workspace
-
-# Register a skill bundle
-gearcore add-skill /path/to/my-skill
-
-# Wrap a traditional CLI program into a skill
-gearcore add-cli ffmpeg
-
-# Sync self-skill to claude/codex/kimi
-gearcore sync
 ```
 
-## How AI Tools Use GearCore
+### 2. Register an MCP server
 
-Once `gearcore sync` has run, the self-skill is installed into `~/.claude/skills/`, `~/.codex/skills/`, and `~/.kimi/skills/` (via symlinks from the canonical `~/.config/agents/skills/gearcore/`).
+```bash
+# Filesystem access
+geracore add-mcp --id filesystem --type stdio \
+  --command npx --args -y @modelcontextprotocol/server-filesystem /home/user/workspace
 
-When an AI tool loads the gearcore skill, it:
+# Web research via Playwright
+geracore add-mcp --id playwright --type stdio \
+  --command npx --args -y @playwright/mcp
+```
 
-1. Checks if the current project has a `.gearcore/` directory
-2. Invokes `gearcore --project <path>` (scoped) or `gearcore` (global)
-3. Calls `list_skills` to see what's available
-4. Calls `request_skill <name>` to unlock a skill and get its instructions + tools
+### 3. Register a skill bundle
 
-## Layered Configuration
+```bash
+# A skill is just a directory with SKILL.md + manifest.json
+geracore add-skill /path/to/my-skill
+```
+
+### 4. See what's available
+
+```bash
+geracore list-skills
+# GearCore skills (global context):
+#   web-research — Web browsing and research via Playwright
+#   filesystem — Secure filesystem access
+#   memory — Persistent memory via SampleMemory
+```
+
+### 5. AI tools use it
+
+Once synced, Kimi/Claude/Codex loads GearCore as a skill and follows this flow:
+
+```
+AI: gearcore list-skills
+→ sees: web-research, filesystem, memory
+
+AI: gearcore request-skill web-research
+→ SKILL.md injected into context
+→ Playwright tools unlocked: browser_navigate, browser_click, ...
+
+AI: gearcore call playwright browser_navigate '{"url": "https://example.com"}'
+→ result returned
+```
+
+## How It Works
+
+```
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│ Claude Code │   │  Codex CLI  │   │  Kimi CLI   │
+└──────┬──────┘   └──────┬──────┘   └──────┬──────┘
+       │                 │                 │
+       └─────────┬───────┴─────────┬───────┘
+                 ▼                 ▼
+        ┌─────────────────────────────────┐
+        │   ~/.config/agents/skills/      │
+        │         gearcore/SKILL.md       │
+        └─────────────────┬───────────────┘
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │    GearCore CLI       │
+              │  ┌─────────────────┐  │
+              │  │  Config Loader  │  │  ← global + project layers
+              │  │  Skill Manager  │  │  ← visibility gating
+              │  │ Process Manager │  │  ← shared MCP backends
+              │  │Conflict Resolver│  │  ← dedup / namespace
+              │  └─────────────────┘  │
+              └───────────┬───────────┘
+                          │
+          ┌───────────────┼───────────────┐
+          ▼               ▼               ▼
+    ┌──────────┐  ┌──────────┐  ┌──────────┐
+    │filesystem│  │playwright│  │ sample-memory  │
+    │  (stdio) │  │  (stdio) │  │  (sse)   │
+    └──────────┘  └──────────┘  └──────────┘
+```
+
+### Progressive Disclosure Flow
+
+```
+gearcore serve starts
+    ↓
+list_tools → returns only: list_skills, request_skill (bootstrap)
+    ↓
+AI calls list_skills → sees available skills
+    ↓
+AI calls request_skill("web-research") → SKILL.md injected, tools unlocked
+    ↓
+list_tools → now includes browser_navigate, browser_click, ...
+```
+
+### Layered Configuration
 
 ```
 ~/.config/gearcore/
-  config.yaml          ← global: all MCPs, all skills, disclosure + resolution rules
+  config.yaml          ← global: all MCPs, all skills, disclosure rules
   skills/              ← global skill bundles
 
 <project>/.gearcore/
-  config.yaml          ← project: allowlist subset, overrides, project context
-  skills/              ← project-local skills (only visible within this project)
+  config.yaml          ← project: allowlist subset, overrides, context name
+  skills/              ← project-local skills (always visible in project)
 ```
 
-**Resolution order:** global → project (project narrows via allowlist, never widens).
-
-When invoked with `--project`, only the allowlisted globals + project-local skills are visible. Without `--project`, everything in the global registry is visible.
-
-See [CONFIG_SCHEMA.md](CONFIG_SCHEMA.md) for the full specification.
-
-## Project Structure
-
-```
-src/gearcore_hub/
-  main.py              ← CLI entry point + serve (MCP hub runtime)
-  config.py            ← layered config loader (global → project)
-  skill_manager.py     ← two-phase skill loading with visibility gating
-  process_manager.py   ← shared MCP server process lifecycle
-  conflict_resolver.py ← tool deduplication and namespacing
-  registry.py          ← add-mcp, add-skill, add-cli, remove commands
-  sync.py              ← self-skill install/symlink to AI CLI tools
-  self_skill/          ← SKILL.md + manifest.json for GearCore itself
-```
+**Resolution order:** built-in defaults → global → project. Projects can only *narrow* scope via allowlists — they never widen it.
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
 | `gearcore list-skills` | List available skills in current context |
-| `gearcore request-skill <name>` | Print a skill's instructions (SKILL.md) |
-| `gearcore call <server> <tool> '<json>'` | Invoke a tool on an MCP backend (stateless) |
-| `gearcore status` | Show effective config and context |
-| `gearcore serve` | Run the MCP hub (fallback for non-skill clients) |
+| `gearcore request-skill <name>` | Unlock a skill and expose its tools |
+| `gearcore call <server> <tool> '<json>'` | One-shot tool invocation on an MCP backend |
+| `gearcore status` | Show effective config and running context |
+| `gearcore serve` | Run the MCP hub (used automatically by AI tools) |
 | `gearcore add-mcp` | Register a new MCP server |
 | `gearcore add-skill <path>` | Register a skill bundle |
-| `gearcore add-cli <program>` | Wrap a CLI via [CLI-Anything](https://github.com/HKUDS/CLI-Anything) |
+| `gearcore add-cli <program>` | Wrap a CLI program into a skill |
 | `gearcore remove mcp\|skill <name>` | Remove an MCP or skill |
-| `gearcore sync` | Install self-skill to AI CLI tools |
+| `gearcore sync` | Install self-skill to Claude / Codex / Kimi |
 
-All commands accept `--project <path>` for project-scoped context.
+All commands accept `--project <path>` for project-scoped context and `-v` for verbose output.
+
+## Writing a Skill
+
+A skill bundle is just a directory with two files:
+
+```
+my-skill/
+  SKILL.md       ← instructions for the AI (markdown + YAML frontmatter)
+  manifest.json  ← metadata: name, description, MCP server mappings
+```
+
+**SKILL.md:**
+
+```markdown
+---
+name: my-skill
+description: What this skill does
+---
+
+# My Skill
+
+When the user asks about X, do Y.
+
+## Tools
+
+Use `gearcore call my-server <tool> '<args>'` to invoke tools.
+```
+
+**manifest.json:**
+
+```json
+{
+  "name": "my-skill",
+  "version": "1.0.0",
+  "description": "What this skill does",
+  "category": "general",
+  "mcp_servers": [
+    {
+      "server_id": "my-server",
+      "tools": ["tool_a", "tool_b"]
+    }
+  ]
+}
+```
+
+See [SKILL_SCHEMA.md](SKILL_SCHEMA.md) for the full specification.
 
 ## Documentation
 
-- [DESIGN_RATIONALE.md](DESIGN_RATIONALE.md) — why skill-first, not MCP-first
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and data flow
-- [CONFIG_SCHEMA.md](CONFIG_SCHEMA.md) — config file specification (global + project)
+- [CONFIG_SCHEMA.md](CONFIG_SCHEMA.md) — config file specification
 - [SKILL_SCHEMA.md](SKILL_SCHEMA.md) — skill bundle format
-- [CONFLICT_RESOLUTION.md](CONFLICT_RESOLUTION.md) — deduplication and namespacing strategy
-- [RESEARCH.md](RESEARCH.md) — background research and problem analysis
+- [CONFLICT_RESOLUTION.md](CONFLICT_RESOLUTION.md) — deduplication strategy
+- [DESIGN_RATIONALE.md](DESIGN_RATIONALE.md) — why skill-first, not MCP-first
 
-## Included Core Skill
+## Development
 
-`first-principles-scientific-mindset` is included as a zero-tool core skill. It keeps
-default reasoning anchored on deriving from fundamentals, making assumptions explicit,
-forming falsifiable hypotheses, and validating conclusions against evidence.
+```bash
+# Clone
+git clone https://github.com/yourusername/gearcore
+cd GearCore
+
+# Install in editable mode
+uv pip install -e ".[dev]"
+
+# Run integration tests
+uv run python verify_hub.py
+uv run python verify_skills.py
+
+# Run the hub manually
+uv run gearcore serve
+```
+
+## License
+
+[MIT](LICENSE)
