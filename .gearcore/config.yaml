@@ -1,0 +1,32 @@
+version: 2
+
+context:
+  name: "GearCore Dev"
+  description: "Unified skill and MCP hub with progressive disclosure and project-scoped context"
+
+scope:
+  mcp_servers:
+    include:
+      - filesystem
+
+  skills:
+    include:
+      - gearcore
+      - code-ops
+      - memory
+      - brainstorming
+      - executing-plans
+      - finishing-a-development-branch
+      - receiving-code-review
+      - requesting-code-review
+      - systematic-debugging
+      - test-driven-development
+      - using-git-worktrees
+      - verification-before-completion
+      - writing-plans
+      - writing-skills
+
+disclosure:
+  core_skills:
+    - gearcore
+  activation_threshold: 0.90
