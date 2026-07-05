@@ -6,8 +6,10 @@ from gearcore_hub.config import (
     EffectiveConfig,
     GlobalConfig,
     ProjectConfig,
+    _default_skills_dirs,
     load_config,
 )
+from gearcore_hub.vendor import bundled_superpowers_dir
 
 
 class TestGlobalConfig:
@@ -15,7 +17,7 @@ class TestGlobalConfig:
         cfg = GlobalConfig()
         assert cfg.version == 2
         assert cfg.mcp_servers == []
-        assert cfg.skills_dirs == []
+        assert cfg.skills_dirs == _default_skills_dirs()
 
     def test_mcp_servers_parsing(self):
         data = {
@@ -114,3 +116,11 @@ class TestLoadConfig:
         cfg = load_config(global_config_path=config_file)
         assert cfg.context_name == "global"
         assert cfg.mcp_servers == []
+
+
+def test_default_skills_dirs_include_bundled_superpowers(monkeypatch, tmp_path):
+    fake_root = tmp_path / "third_party" / "superpowers"
+    (fake_root / "skills").mkdir(parents=True)
+    monkeypatch.setattr("gearcore_hub.vendor.VENDOR_ROOT", fake_root)
+    cfg = GlobalConfig()
+    assert bundled_superpowers_dir() in cfg.skills_dirs

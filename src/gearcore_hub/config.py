@@ -17,6 +17,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field
 
+from gearcore_hub.vendor import bundled_superpowers_dir
+
 logger = logging.getLogger("gearcore.config")
 
 # ---------------------------------------------------------------------------
@@ -52,6 +54,20 @@ class DisclosureConfig(BaseModel):
     core_skills: list[str] = Field(default_factory=list)
 
 
+_DEFAULT_SKILLS_DIRS = [
+    Path.home() / ".config" / "gearcore" / "skills",
+    Path.home() / ".config" / "agents" / "skills",
+]
+
+
+def _default_skills_dirs() -> list[Path]:
+    dirs = list(_DEFAULT_SKILLS_DIRS)
+    bundled = bundled_superpowers_dir()
+    if bundled is not None and bundled not in dirs:
+        dirs.append(bundled)
+    return dirs
+
+
 class GlobalConfig(BaseModel):
     """Schema for ~/.config/gearcore/config.yaml"""
 
@@ -68,7 +84,13 @@ class GlobalConfig(BaseModel):
     @property
     def skills_dirs(self) -> list[Path]:
         raw = self.registry.get("skills_dirs", [])
-        return [Path(os.path.expanduser(str(p))) for p in raw]
+        dirs: list[Path] = [Path(os.path.expanduser(str(p))) for p in raw]
+        if not dirs:
+            dirs = _default_skills_dirs()
+        bundled = bundled_superpowers_dir()
+        if bundled is not None and bundled not in dirs:
+            dirs.append(bundled)
+        return dirs
 
 
 class ProjectScope(BaseModel):
