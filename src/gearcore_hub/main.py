@@ -256,6 +256,22 @@ def cmd_status(config: EffectiveConfig):
     print(f"  strategy: {disc.strategy}")
     print(f"  core_skills: {disc.core_skills or '(none)'}")
     print(f"  activation_threshold: {disc.activation_threshold}")
+    from gearcore_hub.vendor import get_upstream_commit, load_vendor_manifest
+
+    manifest = load_vendor_manifest()
+    if manifest:
+        print("\nVendored skills:")
+        sha = manifest.vendored_commit
+        short_sha = sha[:12] if len(sha) >= 12 else sha
+        print(f"  superpowers @ {short_sha} ({manifest.vendored_at})")
+        upstream = get_upstream_commit(manifest.source, manifest.source_ref)
+        if upstream and upstream != manifest.vendored_commit:
+            upstream_short = upstream[:12] if len(upstream) >= 12 else upstream
+            print(
+                f"  update available: {upstream_short} "
+                "(run 'gearcore update-superpowers' to refresh)"
+            )
+
     print()
 
 
@@ -476,6 +492,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--dry-run", action="store_true")
     p_sync.add_argument("--remove", action="store_true", help="Unlink from all tools")
 
+    # update-superpowers
+    p_update_sp = sub.add_parser(
+        "update-superpowers",
+        help="Update the bundled superpowers skills from upstream",
+    )
+    p_update_sp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show whether an update is available without writing files",
+    )
+
     return parser
 
 
@@ -596,6 +623,31 @@ def main():
         )
         for target, result in results.items():
             print(f"  {target:12s} {result}")
+        return
+
+    if command == "update-superpowers":
+        from gearcore_hub.vendor import update_superpowers
+
+        try:
+            result = update_superpowers(dry_run=args.dry_run)
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        if result.get("changed"):
+            upstream = result["upstream"]
+            upstream_short = upstream[:12] if len(upstream) >= 12 else upstream
+            if result.get("dry_run"):
+                print(
+                    f"Update available: superpowers {upstream_short} "
+                    "(run without --dry-run to apply)"
+                )
+            else:
+                print(f"Updated superpowers to {upstream_short}")
+        else:
+            upstream = result["upstream"]
+            upstream_short = upstream[:12] if len(upstream) >= 12 else upstream
+            print(f"superpowers is up to date ({upstream_short})")
         return
 
     parser.print_help()

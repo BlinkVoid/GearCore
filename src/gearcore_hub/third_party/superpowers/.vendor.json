@@ -1,0 +1,8 @@
+{
+  "name": "superpowers",
+  "source": "https://github.com/obra/superpowers.git",
+  "source_ref": "main",
+  "vendored_commit": "415711485b3740d6d92e545a190ff25c23c5dc8c",
+  "vendored_at": "2026-07-05",
+  "paths": ["skills/*"]
+}
