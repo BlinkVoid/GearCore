@@ -225,6 +225,12 @@ def find_project_root(start: Path | None = None) -> Path | None:
         current = parent
 
 
+def load_global_config(global_config_path: Path | None = None) -> GlobalConfig:
+    """Load only the global layer (no project detection)."""
+    g_path = global_config_path or GLOBAL_CONFIG_PATH
+    return GlobalConfig(**_load_yaml(g_path))
+
+
 def load_config(
     project: Path | None = None,
     global_config_path: Path | None = None,
@@ -237,9 +243,7 @@ def load_config(
         global_config_path: Override for global config file (testing / custom installs).
     """
     # --- Global ---
-    g_path = global_config_path or GLOBAL_CONFIG_PATH
-    g_data = _load_yaml(g_path)
-    global_cfg = GlobalConfig(**g_data)
+    global_cfg = load_global_config(global_config_path)
 
     # --- Project ---
     project_root: Path | None = None

@@ -42,6 +42,43 @@ SELF_SKILL_SOURCE = Path(__file__).parent / "self_skill"
 
 
 # ---------------------------------------------------------------------------
+# Level-0 disclosure embedding
+# ---------------------------------------------------------------------------
+
+
+def embed_level0_section(
+    skill_md: Path, global_config_path: Path | None = None
+) -> bool:
+    """
+    Replace the LEVEL0 marker in *skill_md* with the default-skills section
+    generated from the global config. Global scope only — the canonical
+    self-skill is shared by every project. Returns True if the file changed.
+    """
+    from gearcore_hub.config import EffectiveConfig, load_global_config
+    from gearcore_hub.render import (
+        LEVEL0_MARKER,
+        apply_level0_marker,
+        render_level0_section,
+    )
+    from gearcore_hub.skill_manager import SkillManager
+
+    content = skill_md.read_text(encoding="utf-8")
+    if LEVEL0_MARKER not in content:
+        return False
+
+    global_cfg = load_global_config(global_config_path)
+    effective = EffectiveConfig(global_cfg, None, None)
+    sm = SkillManager(effective)
+    section = render_level0_section(global_cfg.disclosure.core_skills, sm.skills)
+
+    new_content = apply_level0_marker(content, section)
+    if new_content == content:
+        return False
+    skill_md.write_text(new_content, encoding="utf-8")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Detection
 # ---------------------------------------------------------------------------
 
@@ -82,6 +119,9 @@ def _install_canonical(dry_run: bool = False) -> bool:
     if not dry_run:
         CANONICAL_DIR.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(SELF_SKILL_SOURCE, CANONICAL_DIR)
+
+        if embed_level0_section(CANONICAL_DIR / "SKILL.md"):
+            logger.info("Embedded level-0 default-skills section into canonical SKILL.md")
 
     return True
 

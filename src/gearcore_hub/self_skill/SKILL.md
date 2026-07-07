@@ -9,6 +9,8 @@ GearCore is a centralised hub that manages all registered MCPs and skills. It pr
 progressive disclosure — tools are hidden until explicitly unlocked — so the context
 window stays lean by default.
 
+<!-- GEARCORE:LEVEL0 -->
+
 ## When to invoke GearCore
 
 Invoke GearCore when you need to:
@@ -42,6 +44,9 @@ gearcore list-skills --project /absolute/path/to/project
 ```
 Returns all skills visible in the current context with name, description,
 and scope (global or project).
+
+Level-0 default skills are printed in full at the top of the output — read and
+follow them without a separate `request-skill` call.
 
 ### 2. Load a skill
 ```bash
