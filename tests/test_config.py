@@ -124,3 +124,19 @@ def test_default_skills_dirs_include_bundled_superpowers(monkeypatch, tmp_path):
     monkeypatch.setattr("gearcore_hub.vendor.VENDOR_ROOT", fake_root)
     cfg = GlobalConfig()
     assert bundled_superpowers_dir() in cfg.skills_dirs
+
+
+def test_load_global_config_reads_core_skills(tmp_path):
+    from gearcore_hub.config import load_global_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("disclosure:\n  core_skills:\n    - continuity-core\n")
+    g = load_global_config(cfg)
+    assert g.disclosure.core_skills == ["continuity-core"]
+
+
+def test_load_global_config_missing_file_gives_defaults(tmp_path):
+    from gearcore_hub.config import load_global_config
+
+    g = load_global_config(tmp_path / "nope.yaml")
+    assert g.disclosure.core_skills == []
