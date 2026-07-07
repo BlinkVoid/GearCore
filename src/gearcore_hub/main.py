@@ -44,6 +44,7 @@ from mcp.types import TextContent, Tool
 from gearcore_hub.config import EffectiveConfig, load_config
 from gearcore_hub.conflict_resolver import ConflictResolver
 from gearcore_hub.process_manager import ProcessManager, SharedMCPServer
+from gearcore_hub.render import render_skill_instructions
 from gearcore_hub.skill_manager import SkillManager
 
 logging.basicConfig(
@@ -325,17 +326,7 @@ def cmd_request_skill(config: EffectiveConfig, skill_name: str):
             file=sys.stderr,
         )
         sys.exit(1)
-    print(skill.instructions)
-
-    # List required MCP servers so the AI knows what `gearcore call` targets are available
-    if skill.manifest.mcp_servers:
-        print("\n---\n")
-        print("## Available tools (via `gearcore call`)\n")
-        for mcp_entry in skill.manifest.mcp_servers:
-            server_id = mcp_entry.get("server_id", "")
-            tools = mcp_entry.get("tools", [])
-            for tool in tools:
-                print(f"  gearcore call {server_id} {tool} '<json_args>'")
+    print(render_skill_instructions(skill))
 
 
 # ---------------------------------------------------------------------------
