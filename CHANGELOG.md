@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `gearcore sync` now targets OpenCode: symlinks the self-skill into
   `~/.config/opencode/skills/gearcore/` and auto-detects `opencode` on PATH
+- Level-0 skill reveal: `disclosure.core_skills` now also embeds a default-skills
+  section into the synced self-skill and inlines full instructions in
+  `gearcore list-skills` (spec: docs/superpowers/specs/2026-07-07-level0-skill-reveal-design.md)
 
 ## [2.1.0] - 2026-05-01
 

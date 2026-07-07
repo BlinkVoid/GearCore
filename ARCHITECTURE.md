@@ -105,6 +105,8 @@ list_tools → now includes code-ops tools (read_file, write_file, ...)
 
 Tools from MCP backends are **hidden** until the skill that references them is activated. The `is_tool_active()` check gates every tool in the aggregation step.
 
+**Level-0 skills:** names in `disclosure.core_skills` skip the request hop on every surface — auto-activated in `serve` mode, embedded into the synced self-skill, and printed in full by `gearcore list-skills`. Design: `docs/superpowers/specs/2026-07-07-level0-skill-reveal-design.md`.
+
 ---
 
 ## Process Manager
@@ -136,6 +138,7 @@ GearCore includes a self-skill bundle (`src/gearcore_hub/self_skill/`) containin
 
 1. Copies the self-skill to `~/.config/agents/skills/gearcore/` (canonical)
 2. Creates symlinks from `~/.claude/skills/gearcore/`, `~/.codex/skills/gearcore/`, `~/.kimi/skills/gearcore/`, `~/.config/opencode/skills/gearcore/`
+3. Replaces the `<!-- GEARCORE:LEVEL0 -->` marker in the canonical `SKILL.md` with a generated "Default skills" section from the global config's `disclosure.core_skills` (see `docs/superpowers/specs/2026-07-07-level0-skill-reveal-design.md`)
 
 Kimi natively scans `~/.config/agents/skills/` as its highest-priority user path. Claude and Codex discover via their respective symlinked paths. OpenCode scans `{skill,skills}/**/SKILL.md` under `~/.config/opencode/` (and would also pick up the `~/.claude/skills/` symlink via its Claude Code compatibility scan, but the dedicated symlink keeps GearCore visible even when that scan is disabled).
 
@@ -164,3 +167,4 @@ This enables any CLI program to become a progressive-disclosure-gated skill with
 | `conflict_resolver.py` | Tool deduplication, namespacing, unification |
 | `registry.py` | `add-mcp`, `add-skill`, `add-cli`, `remove` — config/skill-dir mutations |
 | `sync.py` | Self-skill install, symlink management across AI CLI tools |
+| `render.py` | Shared instruction rendering, level-0 section generation |
