@@ -52,9 +52,10 @@ class TestListSkillsLevel0:
 
     def test_core_skill_hidden_by_allowlist_skipped_silently(self, tmp_path, capsys):
         _make_skill(tmp_path / "skills", "continuity-core")
+        _make_skill(tmp_path / "skills", "other-skill")
         project_root = tmp_path / "proj"
         (project_root / ".gearcore").mkdir(parents=True)
-        project_cfg = ProjectConfig(scope={"skills": {"include": []}})
+        project_cfg = ProjectConfig(scope={"skills": {"include": ["other-skill"]}})
 
         cmd_list_skills(
             _effective(
@@ -67,3 +68,4 @@ class TestListSkillsLevel0:
 
         out = capsys.readouterr().out
         assert "LEVEL-0" not in out
+        assert "other-skill" in out
