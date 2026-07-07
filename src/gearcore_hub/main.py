@@ -289,10 +289,26 @@ def cmd_list_skills(config: EffectiveConfig):
     if not skills:
         print("  (no skills visible in this context)")
         return
+
+    # Level-0 skills: reveal full instructions inline, before the listing.
+    level0 = [
+        name
+        for name in config.disclosure.core_skills
+        if name in sm.visible_skill_names
+    ]
+    for name in level0:
+        bundle = sm.skills[name]
+        print(f"=== LEVEL-0 SKILL: {name} ===")
+        print("(revealed by default — read and follow these instructions now)\n")
+        print(render_skill_instructions(bundle))
+        print(f"=== END LEVEL-0 SKILL: {name} ===\n")
+
     broken = [s for s in skills if s["status"] == "broken"]
     healthy = [s for s in skills if s["status"] != "broken"]
     for s in healthy:
         tags = []
+        if s["name"] in level0:
+            tags.append("[level-0]")
         if s["status"] == "active":
             tags.append("[active]")
         if s["scope"] == "project":
