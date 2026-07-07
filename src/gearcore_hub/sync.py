@@ -5,9 +5,15 @@ Canonical location:  ~/.config/agents/skills/gearcore/  (owns the actual files)
 Symlinked from:      ~/.claude/skills/gearcore/
                      ~/.codex/skills/gearcore/
                      ~/.kimi/skills/gearcore/
+                     ~/.config/opencode/skills/gearcore/
 
 Kimi already scans ~/.config/agents/skills/ as its highest-priority user path,
 so no extra step is needed for kimi beyond the canonical install.
+
+OpenCode scans {skill,skills}/**/SKILL.md under its config dir
+(~/.config/opencode/); it also reads ~/.claude/skills/ unless the user has
+disabled Claude Code skill discovery, so the dedicated symlink keeps GearCore
+visible either way.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ TOOL_LINK_PATHS: dict[str, Path] = {
     "claude": Path.home() / ".claude" / "skills" / "gearcore",
     "codex": Path.home() / ".codex" / "skills" / "gearcore",
     "kimi": Path.home() / ".kimi" / "skills" / "gearcore",
+    "opencode": Path.home() / ".config" / "opencode" / "skills" / "gearcore",
 }
 
 # Self-skill source lives next to this file inside the package
@@ -178,7 +185,7 @@ def sync(
 
     if not target_tools:
         logger.warning(
-            "No AI CLI tools detected on PATH (claude, codex, kimi). "
+            "No AI CLI tools detected on PATH (claude, codex, kimi, opencode). "
             "Use --tool <name> to force install."
         )
 

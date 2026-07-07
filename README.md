@@ -36,7 +36,7 @@ GearCore is a unified skill and MCP hub that aggregates all your AI tools behind
 - **📁 Project scoping** — Each project can allowlist only the skills it needs via `.gearcore/config.yaml`.
 - **🧠 Core reasoning discipline** — Auto-activated zero-tool skills (like `first-principles-scientific-mindset`) set default reasoning norms without adding tool noise.
 - **⚔️ Conflict resolution** — When multiple MCP servers expose the same tool name, GearCore deduplicates, namespaces, or unifies them automatically.
-- **🔄 One sync to all tools** — `gearcore sync` installs the self-skill into Claude, Codex, and Kimi in one command.
+- **🔄 One sync to all tools** — `gearcore sync` installs the self-skill into Claude, Codex, Kimi, and OpenCode in one command.
 
 ## Installation
 
@@ -49,7 +49,7 @@ uv tool install git+https://github.com/yourusername/gearcore
 # Or install from local source
 uv tool install /path/to/GearCore
 
-# Install the self-skill into Claude, Codex, Kimi
+# Install the self-skill into Claude, Codex, Kimi, OpenCode
 gearcore sync
 ```
 
@@ -92,7 +92,7 @@ geracore list-skills
 
 ### 5. AI tools use it
 
-Once synced, Kimi/Claude/Codex loads GearCore as a skill and follows this flow:
+Once synced, Kimi/Claude/Codex/OpenCode loads GearCore as a skill and follows this flow:
 
 ```
 AI: gearcore list-skills
@@ -180,7 +180,7 @@ list_tools → now includes browser_navigate, browser_click, ...
 | `gearcore add-skill <path>` | Register a skill bundle |
 | `gearcore add-cli <program>` | Wrap a CLI program into a skill |
 | `gearcore remove mcp\|skill <name>` | Remove an MCP or skill |
-| `gearcore sync` | Install self-skill to Claude / Codex / Kimi |
+| `gearcore sync` | Install self-skill to Claude / Codex / Kimi / OpenCode |
 
 All commands accept `--project <path>` for project-scoped context and `-v` for verbose output.
 
