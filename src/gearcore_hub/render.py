@@ -8,7 +8,6 @@ so the different surfaces cannot drift apart.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 
 from gearcore_hub.skill_manager import SkillBundle
 
