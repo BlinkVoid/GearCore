@@ -35,6 +35,7 @@ GearCore is a unified skill and MCP hub that aggregates all your AI tools behind
 - **🔒 Progressive disclosure** — Tools stay hidden until you explicitly unlock a skill via `request_skill`. Your context window stays clean.
 - **📁 Project scoping** — Each project can allowlist only the skills it needs via `.gearcore/config.yaml`.
 - **🧠 Core reasoning discipline** — Auto-activated zero-tool skills (like `first-principles-scientific-mindset`) set default reasoning norms without adding tool noise.
+- **⓪ Level-0 skills** — `disclosure.core_skills` marks skills revealed by default: `list-skills` prints their full instructions and `sync` embeds them into the self-skill.
 - **⚔️ Conflict resolution** — When multiple MCP servers expose the same tool name, GearCore deduplicates, namespaces, or unifies them automatically.
 - **🔄 One sync to all tools** — `gearcore sync` installs the self-skill into Claude, Codex, Kimi, and OpenCode in one command.
 

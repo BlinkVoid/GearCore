@@ -83,7 +83,7 @@ List of paths to scan for skill bundles. Supports `~` expansion. Directories are
 |-------|------|---------|-------------|
 | `strategy` | string | `manual` | `manual` = explicit `request_skill` only. `semantic` = reserved for future LLM-based activation |
 | `activation_threshold` | float | `0.85` | Reserved for semantic strategy |
-| `core_skills` | list[string] | `[]` | Skills auto-activated at session start |
+| `core_skills` | list[string] | `[]` | Level-0 skills: auto-activated in serve mode, embedded in the synced self-skill, revealed inline by `list-skills` |
 
 #### `resolution.categories`
 
