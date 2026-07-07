@@ -94,7 +94,7 @@ Shows active MCP servers, loaded skills, and current context (global or project 
 ## Sync self-skill to all AI CLI tools
 
 ```
-gearcore sync              # auto-detect installed tools (claude, codex, kimi)
+gearcore sync              # auto-detect installed tools (claude, codex, kimi, opencode)
 gearcore sync --tool kimi  # specific tool only
 gearcore sync --dry-run    # preview without changes
 gearcore sync --remove     # unlink from all tools

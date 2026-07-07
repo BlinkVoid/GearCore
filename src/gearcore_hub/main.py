@@ -23,7 +23,7 @@ Usage:
   gearcore add-skill <path> [--scope global|project] [--symlink]
   gearcore add-cli <program> [--scope global|project]
   gearcore remove mcp <id> | skill <name> [--scope global|project]
-  gearcore sync [--tool claude|codex|kimi] [--dry-run] [--remove]
+  gearcore sync [--tool claude|codex|kimi|opencode] [--dry-run] [--remove]
   gearcore status
 """
 
@@ -487,7 +487,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tool",
         nargs="*",
         metavar="TOOL",
-        help="Specific tools to target (claude, codex, kimi). Default: auto-detect.",
+        help="Specific tools to target (claude, codex, kimi, opencode). Default: auto-detect.",
     )
     p_sync.add_argument("--dry-run", action="store_true")
     p_sync.add_argument("--remove", action="store_true", help="Unlink from all tools")

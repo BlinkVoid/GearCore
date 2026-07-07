@@ -135,9 +135,9 @@ Resolution rules are defined in the global config under `resolution.categories`.
 GearCore includes a self-skill bundle (`src/gearcore_hub/self_skill/`) containing `SKILL.md` and `manifest.json`. The `gearcore sync` command:
 
 1. Copies the self-skill to `~/.config/agents/skills/gearcore/` (canonical)
-2. Creates symlinks from `~/.claude/skills/gearcore/`, `~/.codex/skills/gearcore/`, `~/.kimi/skills/gearcore/`
+2. Creates symlinks from `~/.claude/skills/gearcore/`, `~/.codex/skills/gearcore/`, `~/.kimi/skills/gearcore/`, `~/.config/opencode/skills/gearcore/`
 
-Kimi natively scans `~/.config/agents/skills/` as its highest-priority user path. Claude and Codex discover via their respective symlinked paths.
+Kimi natively scans `~/.config/agents/skills/` as its highest-priority user path. Claude and Codex discover via their respective symlinked paths. OpenCode scans `{skill,skills}/**/SKILL.md` under `~/.config/opencode/` (and would also pick up the `~/.claude/skills/` symlink via its Claude Code compatibility scan, but the dedicated symlink keeps GearCore visible even when that scan is disabled).
 
 ---
 
