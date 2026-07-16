@@ -15,6 +15,30 @@ def test_update_superpowers_parser():
     assert args.dry_run is True
 
 
+def test_add_mcp_command_flag_does_not_clobber_subcommand():
+    # Regression: --command shared dest="command" with the subparser action,
+    # so `add-mcp --command uvx` dispatched to "uvx" (no-op help) instead.
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "add-mcp",
+            "--id",
+            "jira",
+            "--type",
+            "stdio",
+            "--command",
+            "uvx",
+            "--args",
+            "mcp-atlassian",
+            "--env",
+            "A=B",
+        ]
+    )
+    assert args.command == "add-mcp"
+    assert args.mcp_command == "uvx"
+    assert args.args == ["mcp-atlassian"]
+
+
 def test_status_prints_vendor_manifest(capsys):
     manifest = MagicMock()
     manifest.vendored_commit = "abcdef1234567890"

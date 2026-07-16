@@ -458,7 +458,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_add_mcp = sub.add_parser("add-mcp", help="Register a new MCP server")
     p_add_mcp.add_argument("--id", required=True)
     p_add_mcp.add_argument("--type", default="stdio", choices=["stdio", "sse", "http"])
-    p_add_mcp.add_argument("--command", default="")
+    # dest must not be "command": that would clobber the subparsers'
+    # dest="command" and break dispatch (add-mcp would silently no-op).
+    p_add_mcp.add_argument("--command", dest="mcp_command", default="")
     p_add_mcp.add_argument("--args", nargs="*", default=[])
     p_add_mcp.add_argument("--url", default="")
     p_add_mcp.add_argument("--env", nargs="*", metavar="KEY=VALUE", default=[])
@@ -561,7 +563,7 @@ def main():
             path = add_mcp(
                 id=args.id,
                 type=args.type,
-                command=args.command,
+                command=args.mcp_command,
                 args=args.args,
                 url=args.url,
                 env=env,
