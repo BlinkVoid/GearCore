@@ -15,8 +15,8 @@ Subcommands:
   sync           Install/update the GearCore self-skill on AI CLI tools
 
 Usage:
-  gearcore list-skills [--project <path>]
-  gearcore request-skill <name> [--project <path>]
+  gearcore [--project <path>] list-skills
+  gearcore [--project <path>] request-skill <name>
   gearcore call <server_id> <tool> ['<json_args>']
   gearcore [--project <path>] [serve]
   gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
