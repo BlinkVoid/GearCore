@@ -40,7 +40,7 @@ to that project.
 ### 1. Discover available skills
 ```bash
 gearcore list-skills
-gearcore list-skills --project /absolute/path/to/project
+gearcore --project /absolute/path/to/project list-skills
 ```
 Returns all skills visible in the current context with name, description,
 and scope (global or project).
@@ -51,7 +51,7 @@ follow them without a separate `request-skill` call.
 ### 2. Load a skill
 ```bash
 gearcore request-skill <skill_name>
-gearcore request-skill <skill_name> --project /absolute/path/to/project
+gearcore --project /absolute/path/to/project request-skill <skill_name>
 ```
 Prints the skill's instructions (SKILL.md). Read and follow these instructions
 to use the skill's capabilities with your native tools.
@@ -83,7 +83,7 @@ globally will not appear when working in a backend API project that hasn't allow
 gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
 
 # Register an existing skill bundle (global or project)
-gearcore add-skill /path/to/skill [--scope project --project /path/to/project]
+gearcore --project /path/to/project add-skill /path/to/skill --scope project
 
 # Wrap a traditional CLI program into a skill via CLI-Anything
 gearcore add-cli <program> [--scope global|project]
