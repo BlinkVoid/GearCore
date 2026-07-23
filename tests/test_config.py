@@ -100,6 +100,58 @@ class TestEffectiveConfig:
         effective = EffectiveConfig(global_cfg, project_cfg, Path("/tmp/fake"))
         assert any(".gearcore/skills" in str(d) for d in effective.skills_dirs)
 
+    def test_project_scoped_server_def_included(self):
+        global_cfg = GlobalConfig(
+            registry={"mcp_servers": [{"id": "fs", "type": "stdio", "command": "npx"}]}
+        )
+        project_cfg = ProjectConfig(
+            registry={
+                "mcp_servers": [
+                    {"id": "swarm-gateway", "type": "sse", "url": "http://127.0.0.1:7111/sse"}
+                ]
+            }
+        )
+        effective = EffectiveConfig(global_cfg, project_cfg, Path("/tmp/fake"))
+        ids = [s.id for s in effective.mcp_servers]
+        assert ids == ["fs", "swarm-gateway"]
+        gateway = effective.mcp_servers[1]
+        assert gateway.type == "sse"
+        assert gateway.url == "http://127.0.0.1:7111/sse"
+
+    def test_project_scoped_server_def_not_visible_without_project(self):
+        global_cfg = GlobalConfig(
+            registry={"mcp_servers": [{"id": "fs", "type": "stdio", "command": "npx"}]}
+        )
+        effective = EffectiveConfig(global_cfg, None, None)
+        assert [s.id for s in effective.mcp_servers] == ["fs"]
+
+    def test_project_scoped_disabled_server_filtered(self):
+        global_cfg = GlobalConfig()
+        project_cfg = ProjectConfig(
+            registry={
+                "mcp_servers": [
+                    {"id": "off", "type": "sse", "url": "http://x", "enabled": False}
+                ]
+            }
+        )
+        effective = EffectiveConfig(global_cfg, project_cfg, Path("/tmp/fake"))
+        assert effective.mcp_servers == []
+
+    def test_project_allowlist_does_not_hide_project_scoped_defs(self):
+        global_cfg = GlobalConfig(
+            registry={"mcp_servers": [{"id": "fs", "type": "stdio", "command": "npx"}]}
+        )
+        project_cfg = ProjectConfig(
+            scope={"mcp_servers": {"include": ["fs"]}},
+            registry={
+                "mcp_servers": [
+                    {"id": "swarm-gateway", "type": "sse", "url": "http://127.0.0.1:7111/sse"}
+                ]
+            },
+        )
+        effective = EffectiveConfig(global_cfg, project_cfg, Path("/tmp/fake"))
+        assert [s.id for s in effective.mcp_servers] == ["fs", "swarm-gateway"]
+
 
 class TestLoadConfig:
     def test_loads_from_explicit_global_path(self, tmp_path: Path):

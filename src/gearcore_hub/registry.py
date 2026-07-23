@@ -89,15 +89,27 @@ def add_mcp(
         registry = data.setdefault("registry", {})
         servers = registry.setdefault("mcp_servers", [])
     else:
-        # Project config uses scope.mcp_servers.include list (allowlist), not full
-        # server definitions — server defs live in global only.
-        scope_block = data.setdefault("scope", {})
-        mcp_scope = scope_block.setdefault("mcp_servers", {})
-        include = mcp_scope.setdefault("include", [])
-        if id not in include:
-            include.append(id)
+        # Project scope: write the full server definition into the project's
+        # own registry so it is only visible in that project context. The
+        # scope.mcp_servers.include allowlist only filters *global* servers.
+        registry = data.setdefault("registry", {})
+        servers = registry.setdefault("mcp_servers", [])
+        if any(s.get("id") == id for s in servers):
+            raise ValueError(
+                f"MCP server '{id}' already registered in project. Remove it first."
+            )
+        entry: dict = {"id": id, "type": type, "enabled": enabled}
+        if type == "stdio":
+            entry["command"] = command
+            if args:
+                entry["args"] = args
+            if env:
+                entry["env"] = env
+        else:
+            entry["url"] = url
+        servers.append(entry)
         _write_yaml(cfg_path, data)
-        logger.info("Added '%s' to project allowlist in %s", id, cfg_path)
+        logger.info("Registered project MCP server '%s' in %s", id, cfg_path)
         return cfg_path
 
     # Global: write the full server definition
@@ -289,10 +301,15 @@ def remove_mcp(
         if len(data["registry"]["mcp_servers"]) == before:
             raise KeyError(f"MCP server '{id}' not found in global config")
     else:
-        include = data.get("scope", {}).get("mcp_servers", {}).get("include", [])
-        if id not in include:
-            raise KeyError(f"MCP server '{id}' not in project allowlist")
-        include.remove(id)
+        servers = data.get("registry", {}).get("mcp_servers", [])
+        remaining = [s for s in servers if s.get("id") != id]
+        if len(remaining) != len(servers):
+            data["registry"]["mcp_servers"] = remaining
+        else:
+            include = data.get("scope", {}).get("mcp_servers", {}).get("include", [])
+            if id not in include:
+                raise KeyError(f"MCP server '{id}' not found in project config")
+            include.remove(id)
 
     _write_yaml(cfg_path, data)
     logger.info("Removed MCP server '%s' from %s", id, cfg_path)
