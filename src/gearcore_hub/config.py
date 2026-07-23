@@ -109,6 +109,7 @@ class ProjectConfig(BaseModel):
     version: int = 2
     context: ProjectContext = Field(default_factory=ProjectContext)
     scope: ProjectScope = Field(default_factory=ProjectScope)
+    registry: dict[str, Any] = Field(default_factory=dict)  # project-local defs
     disclosure: DisclosureConfig | None = None  # overrides global if present
 
     @property
@@ -120,6 +121,11 @@ class ProjectConfig(BaseModel):
     def skill_allowlist(self) -> list[str] | None:
         inc = self.scope.skills.get("include")
         return inc if inc is not None else None
+
+    @property
+    def mcp_servers(self) -> list[McpServerConfig]:
+        raw = self.registry.get("mcp_servers", [])
+        return [McpServerConfig(**s) for s in raw]
 
 
 class EffectiveConfig:
@@ -146,9 +152,12 @@ class EffectiveConfig:
         if self.project_cfg is None:
             return servers
         allowlist = self.project_cfg.mcp_allowlist
-        if allowlist is None:
-            return servers  # no scope key → keep all
-        return [s for s in servers if s.id in allowlist]
+        if allowlist is not None:
+            servers = [s for s in servers if s.id in allowlist]
+        project_servers = [
+            s for s in self.project_cfg.mcp_servers if s.enabled
+        ]
+        return servers + project_servers
 
     # --- Skills dirs (global first, then project-local) ---
 
