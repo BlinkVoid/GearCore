@@ -448,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # call
     p_call = sub.add_parser("call", help="Invoke a tool on an MCP backend (stateless)")
-    p_call.add_argument("server_id", help="MCP server ID (e.g. swarm-gateway)")
+    p_call.add_argument("server_id", help="MCP server ID (e.g. filesystem)")
     p_call.add_argument("tool", help="Tool name to call (e.g. worker_register)")
     p_call.add_argument(
         "args_json", nargs="?", default="", help="JSON-encoded arguments (default: {})"
