@@ -33,7 +33,7 @@ registry:
 
     - id: hive-gateway
       type: sse
-      url: http://127.0.0.1:7111/sse
+      url: http://127.0.0.1:8765/sse   # must match hive.config.json gateway.port
       enabled: true
 
   skills_dirs:
