@@ -162,11 +162,11 @@ list_tools → now includes browser_navigate, browser_click, ...
   skills/              ← global skill bundles
 
 <project>/.gearcore/
-  config.yaml          ← project: allowlist subset, overrides, context name
+  config.yaml          ← project: allowlist subset, project-local MCP defs, overrides, context name
   skills/              ← project-local skills (always visible in project)
 ```
 
-**Resolution order:** built-in defaults → global → project. Projects can only *narrow* scope via allowlists — they never widen it.
+**Resolution order:** built-in defaults → global → project. Projects *narrow* global scope via allowlists. Project-local definitions (`.gearcore/skills/` and project `registry.mcp_servers`) are always visible in that project, never outside it; a project MCP def overrides a global one with the same id.
 
 ## CLI Reference
 
@@ -177,7 +177,7 @@ list_tools → now includes browser_navigate, browser_click, ...
 | `gearcore call <server> <tool> '<json>'` | One-shot tool invocation on an MCP backend |
 | `gearcore status` | Show effective config and running context |
 | `gearcore serve` | Run the MCP hub (used automatically by AI tools) |
-| `gearcore add-mcp` | Register a new MCP server |
+| `gearcore add-mcp` | Register a new MCP server (`--scope project` for a project-local def, add `--allowlist` to allowlist an existing global server instead) |
 | `gearcore add-skill <path>` | Register a skill bundle |
 | `gearcore add-cli <program>` | Wrap a CLI program into a skill |
 | `gearcore remove mcp\|skill <name>` | Remove an MCP or skill |

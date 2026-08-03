@@ -9,7 +9,7 @@ GearCore uses a layered YAML configuration system. The global config is the sour
 | Layer | Path | Purpose |
 |-------|------|---------|
 | Global | `~/.config/gearcore/config.yaml` | Full registry of MCPs, skill dirs, disclosure rules, resolution rules |
-| Project | `<project>/.gearcore/config.yaml` | Allowlist subset, disclosure overrides, project context metadata |
+| Project | `<project>/.gearcore/config.yaml` | Allowlist subset, project-local MCP defs, disclosure overrides, project context metadata |
 
 ---
 
@@ -126,6 +126,15 @@ disclosure:
     - first-principles-scientific-mindset
     - swarm-worker                # auto-activate when this project loads
   activation_threshold: 0.90
+
+# Optional — project-local MCP server definitions, visible ONLY in this
+# project context (like .gearcore/skills/). Not filtered by the allowlist.
+registry:
+  mcp_servers:
+    - id: swarm-gateway
+      type: sse
+      url: http://127.0.0.1:8765/sse
+      enabled: true
 ```
 
 ### Fields
@@ -151,6 +160,17 @@ List of skill names from the global registry. Only skills listed here are visibl
 
 Same schema as global. When present, completely overrides the global disclosure settings for this project context.
 
+#### `registry.mcp_servers[]` (optional)
+
+Project-local MCP server definitions. Same per-entry schema as the global `registry.mcp_servers[]`. Semantics:
+
+- Visible **only** when this project context is active; never outside it.
+- **Not** filtered by `scope.mcp_servers.include` (the allowlist only narrows *global* servers).
+- An `enabled: false` entry is skipped.
+- **Id collision:** a project-local definition with the same `id` as a global server **overrides** the global one (a warning is logged). Use this deliberately to repoint a server per project.
+
+Manage via CLI: `gearcore --project <path> add-mcp --id X ...` writes a project-local definition here; `gearcore --project <path> add-mcp --id X --allowlist` instead appends an existing global id to `scope.mcp_servers.include` (no new definition).
+
 ---
 
 ## Project Directory Structure
@@ -171,6 +191,8 @@ Same schema as global. When present, completely overrides the global disclosure 
 
 ```
 Global MCPs       →  filtered by project scope.mcp_servers.include
+Project MCP defs  →  always included when project context present;
+                     override globals with the same id (warning logged)
 Global skills     →  filtered by project scope.skills.include
 Project skills    →  always included when project context present
 Disclosure rules  →  project overrides global if present

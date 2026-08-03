@@ -107,7 +107,7 @@ class TestEffectiveConfig:
         project_cfg = ProjectConfig(
             registry={
                 "mcp_servers": [
-                    {"id": "swarm-gateway", "type": "sse", "url": "http://127.0.0.1:7111/sse"}
+                    {"id": "swarm-gateway", "type": "sse", "url": "http://127.0.0.1:8765/sse"}
                 ]
             }
         )
@@ -116,7 +116,7 @@ class TestEffectiveConfig:
         assert ids == ["fs", "swarm-gateway"]
         gateway = effective.mcp_servers[1]
         assert gateway.type == "sse"
-        assert gateway.url == "http://127.0.0.1:7111/sse"
+        assert gateway.url == "http://127.0.0.1:8765/sse"
 
     def test_project_scoped_server_def_not_visible_without_project(self):
         global_cfg = GlobalConfig(
@@ -137,6 +137,29 @@ class TestEffectiveConfig:
         effective = EffectiveConfig(global_cfg, project_cfg, Path("/tmp/fake"))
         assert effective.mcp_servers == []
 
+    def test_project_def_overrides_global_with_same_id(self, caplog):
+        global_cfg = GlobalConfig(
+            registry={
+                "mcp_servers": [
+                    {"id": "gw", "type": "sse", "url": "http://global:1/sse"},
+                    {"id": "fs", "type": "stdio", "command": "npx"},
+                ]
+            }
+        )
+        project_cfg = ProjectConfig(
+            registry={
+                "mcp_servers": [
+                    {"id": "gw", "type": "sse", "url": "http://project:2/sse"}
+                ]
+            }
+        )
+        with caplog.at_level("WARNING", logger="gearcore.config"):
+            effective = EffectiveConfig(global_cfg, project_cfg, Path("/tmp/fake"))
+            servers = effective.mcp_servers
+        assert [s.id for s in servers] == ["fs", "gw"]
+        assert servers[1].url == "http://project:2/sse"
+        assert any("gw" in r.message and "override" in r.message for r in caplog.records)
+
     def test_project_allowlist_does_not_hide_project_scoped_defs(self):
         global_cfg = GlobalConfig(
             registry={"mcp_servers": [{"id": "fs", "type": "stdio", "command": "npx"}]}
@@ -145,7 +168,7 @@ class TestEffectiveConfig:
             scope={"mcp_servers": {"include": ["fs"]}},
             registry={
                 "mcp_servers": [
-                    {"id": "swarm-gateway", "type": "sse", "url": "http://127.0.0.1:7111/sse"}
+                    {"id": "swarm-gateway", "type": "sse", "url": "http://127.0.0.1:8765/sse"}
                 ]
             },
         )
