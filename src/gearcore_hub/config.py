@@ -157,6 +157,15 @@ class EffectiveConfig:
         project_servers = [
             s for s in self.project_cfg.mcp_servers if s.enabled
         ]
+        project_ids = {s.id for s in project_servers}
+        shadowed = [s.id for s in servers if s.id in project_ids]
+        if shadowed:
+            logger.warning(
+                "Project MCP server definition(s) %s override global "
+                "definition(s) with the same id",
+                ", ".join(sorted(shadowed)),
+            )
+            servers = [s for s in servers if s.id not in project_ids]
         return servers + project_servers
 
     # --- Skills dirs (global first, then project-local) ---

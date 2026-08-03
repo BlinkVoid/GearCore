@@ -449,7 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
     # call
     p_call = sub.add_parser("call", help="Invoke a tool on an MCP backend (stateless)")
     p_call.add_argument("server_id", help="MCP server ID (e.g. filesystem)")
-    p_call.add_argument("tool", help="Tool name to call (e.g. worker_register)")
+    p_call.add_argument("tool", help="Tool name to call (e.g. read_file)")
     p_call.add_argument(
         "args_json", nargs="?", default="", help="JSON-encoded arguments (default: {})"
     )
@@ -465,6 +465,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_add_mcp.add_argument("--url", default="")
     p_add_mcp.add_argument("--env", nargs="*", metavar="KEY=VALUE", default=[])
     p_add_mcp.add_argument("--scope", default="global", choices=["global", "project"])
+    p_add_mcp.add_argument(
+        "--allowlist",
+        action="store_true",
+        help="With --scope project: allowlist an existing global server "
+        "instead of writing a project-local definition",
+    )
     p_add_mcp.add_argument("--disabled", action="store_true")
 
     # add-skill
@@ -570,6 +576,7 @@ def main():
                 scope=args.scope,
                 project_root=project_path,
                 enabled=not args.disabled,
+                allowlist=args.allowlist,
             )
             print(f"Registered MCP server '{args.id}' in {path}")
         except (ValueError, KeyError) as exc:

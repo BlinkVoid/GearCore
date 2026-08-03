@@ -19,9 +19,15 @@ via `request-skill` — progressive disclosure keeps the context window lean.
   hub process; OS process lifecycle = session lifecycle. Shared process management exists only in
   `serve` mode (`process_manager.py`).
 - **Layered config, narrow-only scoping**: built-in defaults → `~/.config/gearcore/config.yaml` →
-  `<project>/.gearcore/config.yaml`. Projects can only *narrow* via allowlists (`scope.*.include`),
-  never widen. Project-local skills (`.gearcore/skills/`) are always visible in that project and
-  never outside it. Preserve this invariant in `config.py`/`skill_manager.py`.
+  `<project>/.gearcore/config.yaml`. Projects *narrow* global registrations via allowlists
+  (`scope.*.include`). The one exception: project-local definitions — skills in `.gearcore/skills/`
+  and MCP servers in project `registry.mcp_servers` — are always visible in that project, never
+  outside it, and a project MCP def overrides a global one with the same id (warning logged).
+  Preserve this invariant in `config.py`/`skill_manager.py`.
+- **`add-mcp --scope project` has two modes**: default writes a project-local definition into
+  `registry.mcp_servers`; `--allowlist` appends an existing global id to `scope.mcp_servers.include`.
+  Without `--allowlist`, passing a global id creates a shadowing project-local def — almost never
+  what you want for an already-global server.
 - **Skill levels**: L0 skills (`disclosure.core_skills`) skip the request hop — auto-activated in
   `serve`, embedded into the synced self-skill, printed in full by `list-skills`. L1/L2 require
   explicit `request-skill`. Spec: `docs/superpowers/specs/2026-07-07-level0-skill-reveal-design.md`.

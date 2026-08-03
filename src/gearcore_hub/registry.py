@@ -65,6 +65,27 @@ def _skills_dir(scope: str, project_root: Path | None) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _server_entry(
+    id: str,
+    type: str,
+    command: str = "",
+    args: list[str] | None = None,
+    url: str = "",
+    env: dict[str, str] | None = None,
+    enabled: bool = True,
+) -> dict:
+    entry: dict = {"id": id, "type": type, "enabled": enabled}
+    if type == "stdio":
+        entry["command"] = command
+        if args:
+            entry["args"] = args
+        if env:
+            entry["env"] = env
+    else:
+        entry["url"] = url
+    return entry
+
+
 def add_mcp(
     id: str,
     type: str,
@@ -75,9 +96,14 @@ def add_mcp(
     scope: str = "global",
     project_root: Path | None = None,
     enabled: bool = True,
+    allowlist: bool = False,
 ) -> Path:
     """
     Register a new MCP server in the config.
+
+    With scope="project" + allowlist=True, no new definition is written:
+    instead the id of an existing *global* server is appended to the
+    project's scope.mcp_servers.include allowlist.
 
     Returns the path of the config file that was modified.
     Raises ValueError if an entry with the same id already exists.
@@ -85,50 +111,38 @@ def add_mcp(
     cfg_path = _config_path(scope, project_root)
     data = _read_yaml(cfg_path)
 
-    if scope == "global":
-        registry = data.setdefault("registry", {})
-        servers = registry.setdefault("mcp_servers", [])
-    else:
-        # Project scope: write the full server definition into the project's
-        # own registry so it is only visible in that project context. The
-        # scope.mcp_servers.include allowlist only filters *global* servers.
-        registry = data.setdefault("registry", {})
-        servers = registry.setdefault("mcp_servers", [])
-        if any(s.get("id") == id for s in servers):
+    if allowlist:
+        if scope != "project":
+            raise ValueError("--allowlist requires --scope project")
+        global_data = _read_yaml(GLOBAL_CONFIG_PATH)
+        global_ids = {
+            s.get("id")
+            for s in global_data.get("registry", {}).get("mcp_servers", [])
+        }
+        if id not in global_ids:
             raise ValueError(
-                f"MCP server '{id}' already registered in project. Remove it first."
+                f"MCP server '{id}' is not registered globally; "
+                "omit --allowlist to write a project-local definition instead"
             )
-        entry: dict = {"id": id, "type": type, "enabled": enabled}
-        if type == "stdio":
-            entry["command"] = command
-            if args:
-                entry["args"] = args
-            if env:
-                entry["env"] = env
-        else:
-            entry["url"] = url
-        servers.append(entry)
+        include = data.setdefault("scope", {}).setdefault(
+            "mcp_servers", {}
+        ).setdefault("include", [])
+        if id in include:
+            raise ValueError(f"MCP server '{id}' already allowlisted in project.")
+        include.append(id)
         _write_yaml(cfg_path, data)
-        logger.info("Registered project MCP server '%s' in %s", id, cfg_path)
+        logger.info("Allowlisted global MCP server '%s' in %s", id, cfg_path)
         return cfg_path
 
-    # Global: write the full server definition
+    registry_section = data.setdefault("registry", {})
+    servers = registry_section.setdefault("mcp_servers", [])
     if any(s.get("id") == id for s in servers):
-        raise ValueError(f"MCP server '{id}' already registered. Remove it first.")
+        where = "in project" if scope == "project" else ""
+        raise ValueError(f"MCP server '{id}' already registered {where}. Remove it first.")
 
-    entry: dict = {"id": id, "type": type, "enabled": enabled}
-    if type == "stdio":
-        entry["command"] = command
-        if args:
-            entry["args"] = args
-        if env:
-            entry["env"] = env
-    else:
-        entry["url"] = url
-
-    servers.append(entry)
+    servers.append(_server_entry(id, type, command, args, url, env, enabled))
     _write_yaml(cfg_path, data)
-    logger.info("Registered MCP server '%s' in %s", id, cfg_path)
+    logger.info("Registered MCP server '%s' (%s scope) in %s", id, scope, cfg_path)
     return cfg_path
 
 
@@ -301,15 +315,18 @@ def remove_mcp(
         if len(data["registry"]["mcp_servers"]) == before:
             raise KeyError(f"MCP server '{id}' not found in global config")
     else:
+        removed = False
         servers = data.get("registry", {}).get("mcp_servers", [])
         remaining = [s for s in servers if s.get("id") != id]
         if len(remaining) != len(servers):
             data["registry"]["mcp_servers"] = remaining
-        else:
-            include = data.get("scope", {}).get("mcp_servers", {}).get("include", [])
-            if id not in include:
-                raise KeyError(f"MCP server '{id}' not found in project config")
+            removed = True
+        include = data.get("scope", {}).get("mcp_servers", {}).get("include", [])
+        if id in include:
             include.remove(id)
+            removed = True
+        if not removed:
+            raise KeyError(f"MCP server '{id}' not found in project config")
 
     _write_yaml(cfg_path, data)
     logger.info("Removed MCP server '%s' from %s", id, cfg_path)
