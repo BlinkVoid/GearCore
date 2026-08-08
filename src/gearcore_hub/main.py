@@ -43,7 +43,13 @@ from mcp.types import TextContent, Tool
 
 from gearcore_hub.config import EffectiveConfig, load_config
 from gearcore_hub.conflict_resolver import ConflictResolver
-from gearcore_hub.process_manager import ProcessManager, SharedMCPServer
+from gearcore_hub.credentials import CredentialStore
+from gearcore_hub.process_manager import (
+    MCPAuthenticationError,
+    MCPBackendStartError,
+    ProcessManager,
+    sanitize_authenticated_control_flow,
+)
 from gearcore_hub.render import render_skill_instructions
 from gearcore_hub.skill_manager import SkillManager
 
@@ -54,6 +60,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("gearcore")
 
+AUTHENTICATED_BACKEND_FAILURE_MESSAGE = "authenticated backend request failed"
+
 
 # ---------------------------------------------------------------------------
 # Serve command — the MCP hub runtime
@@ -61,14 +69,24 @@ logger = logging.getLogger("gearcore")
 
 
 class GearCoreHub:
-    def __init__(self, config: EffectiveConfig):
+    def __init__(
+        self,
+        config: EffectiveConfig,
+        *,
+        credential_store: CredentialStore | None = None,
+    ):
         self.config = config
-        self.process_manager = ProcessManager()
+        self.process_manager = ProcessManager(credential_store=credential_store)
         self.skill_manager = SkillManager(config)
         self.conflict_resolver = ConflictResolver(config.resolution.model_dump())
         self.resolved_tool_map: dict = {}
         self.server = Server("gearcore-hub")
         self._setup_handlers()
+
+    def _log_authenticated_backend_failure(self, server_id: str) -> None:
+        logger.error(
+            "Authenticated backend request failed for '%s'", server_id
+        )
 
     def _setup_handlers(self):
         @self.server.list_tools()
@@ -106,6 +124,7 @@ class GearCoreHub:
             aggregated_raw = []
             for server_id, server in self.process_manager.servers.items():
                 if server.session:
+                    propagated: BaseException | None = None
                     try:
                         resp = await asyncio.wait_for(
                             server.session.list_tools(), timeout=10.0
@@ -121,8 +140,24 @@ class GearCoreHub:
                                 )
                     except TimeoutError:
                         logger.warning("list_tools timed out for %s", server_id)
-                    except Exception as exc:
-                        logger.error("list_tools failed for %s: %s", server_id, exc)
+                    except BaseException as caught:
+                        if server.authenticated:
+                            propagated = sanitize_authenticated_control_flow(
+                                caught
+                            )
+                        if propagated is None:
+                            if isinstance(caught, Exception) and server.authenticated:
+                                self._log_authenticated_backend_failure(server_id)
+                            elif isinstance(caught, Exception):
+                                logger.error(
+                                    "list_tools failed for %s: %s",
+                                    server_id,
+                                    caught,
+                                )
+                            else:
+                                propagated = caught
+                    if propagated is not None:
+                        raise propagated from None
 
             resolved_tools, tool_map = self.conflict_resolver.resolve(aggregated_raw)
             self.resolved_tool_map.clear()
@@ -203,9 +238,29 @@ class GearCoreHub:
                         type="text", text="Error: Tool call timed out after 60 seconds."
                     )
                 ]
-            except Exception as exc:
-                logger.error("Tool call %s failed: %s", name, exc)
-                return [TextContent(type="text", text=f"Error: {exc}")]
+            except BaseException as caught:
+                backend = self.process_manager.servers.get(mapping["server_id"])
+                if backend is not None and backend.authenticated:
+                    propagated = sanitize_authenticated_control_flow(caught)
+                    if propagated is None:
+                        if isinstance(caught, Exception):
+                            self._log_authenticated_backend_failure(
+                                mapping["server_id"]
+                            )
+                            return [
+                                TextContent(
+                                    type="text",
+                                    text=f"Error: {AUTHENTICATED_BACKEND_FAILURE_MESSAGE}.",
+                                )
+                            ]
+                        propagated = caught
+                elif isinstance(caught, Exception):
+                    logger.error("Tool call %s failed: %s", name, caught)
+                    return [TextContent(type="text", text=f"Error: {caught}")]
+                else:
+                    propagated = caught
+            if propagated is not None:
+                raise propagated from None
 
     async def _start_backends(self):
         if self.config.diagnostic_only:
@@ -213,7 +268,7 @@ class GearCoreHub:
         for server_cfg in self.config.mcp_servers:
             try:
                 await asyncio.wait_for(
-                    self.process_manager.register_and_start(server_cfg.model_dump()),
+                    self.process_manager.register_and_start(server_cfg),
                     timeout=15.0,
                 )
             except TimeoutError:
@@ -395,7 +450,14 @@ def cmd_request_skill(config: EffectiveConfig, skill_name: str):
 # ---------------------------------------------------------------------------
 
 
-def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str):
+def cmd_call(
+    config: EffectiveConfig,
+    server_id: str,
+    tool: str,
+    args_json: str,
+    *,
+    credential_store: CredentialStore | None = None,
+):
     import json as _json
 
     if config.diagnostic_only:
@@ -425,14 +487,8 @@ def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str)
         sys.exit(1)
 
     async def _run():
-        server = SharedMCPServer(
-            server_id=server_cfg.id,
-            transport=server_cfg.type,
-            command=server_cfg.command,
-            args=server_cfg.args,
-            url=server_cfg.url,
-            env=server_cfg.env,
-        )
+        process_manager = ProcessManager(credential_store=credential_store)
+        server = process_manager.build_server(server_cfg)
         try:
             await server.start()
             result = await server.session.call_tool(tool, tool_args)
@@ -444,11 +500,27 @@ def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str)
         finally:
             await server.stop()
 
+    failure_message: str | None = None
+    propagated: BaseException | None = None
     try:
         asyncio.run(_run())
-    except Exception as exc:
-        print(f"error: {server_id}/{tool} — {exc}")
-        sys.exit(1)
+    except (MCPAuthenticationError, MCPBackendStartError) as exc:
+        failure_message = str(exc)
+    except BaseException as caught:
+        if server_cfg.auth is not None:
+            propagated = sanitize_authenticated_control_flow(caught)
+        if propagated is None:
+            if isinstance(caught, Exception) and server_cfg.auth is not None:
+                failure_message = AUTHENTICATED_BACKEND_FAILURE_MESSAGE
+            elif isinstance(caught, Exception):
+                failure_message = str(caught)
+            else:
+                propagated = caught
+    if propagated is not None:
+        raise propagated from None
+    if failure_message is not None:
+        print(f"error: {server_id}/{tool} — {failure_message}")
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
