@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -89,9 +90,52 @@ def test_rejects_directory(tmp_path: Path):
 def test_rejects_foreign_owner_safely_simulated(tmp_path: Path, monkeypatch):
     root = tmp_path / "credentials"
     _credential_file(root)
-    monkeypatch.setattr(os, "getuid", lambda: os.stat(root / "dispatcher").st_uid + 1)
+    real_fstat = os.fstat
+    credential_metadata = os.stat(root / "dispatcher")
+
+    def foreign_file_fstat(fd: int):
+        metadata = real_fstat(fd)
+        if stat.S_ISREG(metadata.st_mode):
+            values = list(metadata)
+            values[4] = credential_metadata.st_uid + 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(os, "fstat", foreign_file_fstat)
 
     with pytest.raises(CredentialError, match="unsafe credential file"):
+        CredentialStore(root).read("dispatcher")
+
+
+def test_rejects_foreign_owned_credential_root_safely_simulated(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "credentials"
+    _credential_file(root)
+    real_fstat = os.fstat
+    root_metadata = os.stat(root)
+
+    def foreign_root_fstat(fd: int):
+        metadata = real_fstat(fd)
+        if stat.S_ISDIR(metadata.st_mode):
+            values = list(metadata)
+            values[4] = root_metadata.st_uid + 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(os, "fstat", foreign_root_fstat)
+
+    with pytest.raises(CredentialError, match="unsafe credential root"):
+        CredentialStore(root).read("dispatcher")
+
+
+@pytest.mark.parametrize("mode", [0o720, 0o707, 0o777])
+def test_rejects_group_or_other_writable_credential_root(tmp_path: Path, mode: int):
+    root = tmp_path / "credentials"
+    _credential_file(root)
+    root.chmod(mode)
+
+    with pytest.raises(CredentialError, match="unsafe credential root"):
         CredentialStore(root).read("dispatcher")
 
 
@@ -153,6 +197,31 @@ def test_rejects_file_replaced_between_validation_and_open(tmp_path: Path, monke
         CredentialStore(root).read("dispatcher")
 
     assert "replacement-secret" not in str(exc_info.value)
+
+
+def test_fifo_replacement_is_opened_nonblocking_then_rejected(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "credentials"
+    original_path = _credential_file(root)
+    fifo = tmp_path / "replacement-fifo"
+    os.mkfifo(fifo, mode=0o600)
+    real_open = os.open
+    replaced = False
+
+    def replacing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal replaced
+        if path == "dispatcher" and dir_fd is not None and not replaced:
+            replaced = True
+            os.replace(fifo, original_path)
+            if not flags & os.O_NONBLOCK:
+                raise AssertionError("credential FIFO was opened in blocking mode")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", replacing_open)
+
+    with pytest.raises(CredentialError, match="unsafe credential file"):
+        CredentialStore(root).read("dispatcher")
 
 
 def test_default_root_is_user_gearcore_credential_directory():

@@ -9,7 +9,10 @@ from pathlib import Path
 from pydantic import SecretStr
 
 _HAS_SECURE_FILE_API = (
-    all(hasattr(os, name) for name in ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW"))
+    all(
+        hasattr(os, name)
+        for name in ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+    )
     and hasattr(os, "getuid")
     and os.open in os.supports_dir_fd
     and os.stat in os.supports_dir_fd
@@ -51,6 +54,15 @@ class CredentialStore:
         self.root = root or Path.home() / ".config" / "gearcore" / "credentials"
 
     @staticmethod
+    def _validate_root(metadata: os.stat_result) -> None:
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o022
+        ):
+            raise CredentialError("unsafe credential root")
+
+    @staticmethod
     def _validate_file(metadata: os.stat_result) -> None:
         if (
             not stat.S_ISREG(metadata.st_mode)
@@ -71,10 +83,11 @@ class CredentialStore:
         try:
             root_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
             root_fd = os.open(self.root, root_flags)
+            self._validate_root(os.fstat(root_fd))
             before = os.stat(safe_id, dir_fd=root_fd, follow_symlinks=False)
             self._validate_file(before)
 
-            file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+            file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
             credential_fd = os.open(safe_id, file_flags, dir_fd=root_fd)
             after = os.fstat(credential_fd)
             self._validate_file(after)

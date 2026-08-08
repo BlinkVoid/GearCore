@@ -9,15 +9,26 @@ Resolution order (highest priority last):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Self
+from urllib.parse import parse_qsl, urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from pydantic.config import ExtraValues
 
 from gearcore_hub.credentials import CredentialError, validate_credential_id
 from gearcore_hub.profiles import (
@@ -43,38 +54,58 @@ _AUTH_MODEL_CONFIG = ConfigDict(extra="forbid", frozen=True, hide_input_in_error
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _AUTH_REFERENCE_FIELDS = {"credential_ref", "http_scheme", "stdio_environment"}
 _SENSITIVE_NAME_PARTS = {
+    "auth",
     "authorization",
+    "bearer",
     "credential",
     "credentials",
     "password",
+    "pat",
     "secret",
     "token",
 }
+_SAFE_REFERENCE_SUFFIXES = {"file", "path", "ref"}
+_SENSITIVE_CARRIER_SUFFIXES = {"header", "value"}
 _SENSITIVE_COMPACT_SUFFIXES = (
     "apikey",
+    "auth",
     "authorization",
+    "bearer",
     "credential",
     "credentials",
     "password",
+    "pat",
     "privatekey",
     "secret",
     "token",
 )
 
 
+class McpConfigError(ValueError):
+    """Stable error that never retains rejected configuration input."""
+
+
 def _is_sensitive_config_name(name: object) -> bool:
     """Conservatively identify names conventionally used to carry secrets.
 
-    Matching uses whole delimiter-separated parts and conventional compact
-    suffixes. It intentionally catches API_TOKEN and service_api_key while
-    allowing unrelated names such as TOKENIZER_PATH.
+    A terminal sensitive segment (API_TOKEN, HIVE_AUTH), a known header/value
+    carrier, or a compact conventional name (APIKEY) is rejected. Reference
+    suffixes FILE, PATH, and REF are allowed, as are unrelated purposes such
+    as PASSWORD_POLICY and TOKENIZER_PATH.
     """
 
-    normalized = str(name).casefold()
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name))
+    normalized = separated.casefold()
     parts = tuple(part for part in re.split(r"[^a-z0-9]+", normalized) if part)
+    if not parts or parts[-1] in _SAFE_REFERENCE_SUFFIXES:
+        return False
     compact = "".join(parts)
     return (
-        bool(_SENSITIVE_NAME_PARTS.intersection(parts))
+        parts[-1] in _SENSITIVE_NAME_PARTS
+        or (
+            parts[-1] in _SENSITIVE_CARRIER_SUFFIXES
+            and bool(_SENSITIVE_NAME_PARTS.intersection(parts[:-1]))
+        )
         or any(compact.endswith(suffix) for suffix in _SENSITIVE_COMPACT_SUFFIXES)
         or any(
             pair == ("api", "key") for pair in zip(parts, parts[1:], strict=False)
@@ -88,11 +119,14 @@ def _contains_plaintext_auth_route(value: object, *, in_auth: bool = False) -> b
     if isinstance(value, dict):
         for key, nested in value.items():
             normalized_key = str(key).casefold().replace("-", "_")
-            if not (
-                in_auth and normalized_key in _AUTH_REFERENCE_FIELDS
-            ) and _is_sensitive_config_name(key):
+            is_auth_container = normalized_key == "auth" and not in_auth
+            if (
+                not is_auth_container
+                and not (in_auth and normalized_key in _AUTH_REFERENCE_FIELDS)
+                and _is_sensitive_config_name(key)
+            ):
                 return True
-            child_is_auth = normalized_key == "auth"
+            child_is_auth = is_auth_container
             if _contains_plaintext_auth_route(nested, in_auth=child_is_auth):
                 return True
     elif isinstance(value, (list, tuple)):
@@ -100,20 +134,193 @@ def _contains_plaintext_auth_route(value: object, *, in_auth: bool = False) -> b
     return False
 
 
-class McpAuthConfig(BaseModel):
+def _arguments_contain_plaintext_auth(value: object) -> bool:
+    if not isinstance(value, (list, tuple)):
+        return False
+    for argument in value:
+        if not isinstance(argument, str) or not argument.startswith("--"):
+            continue
+        flag = argument[2:].partition("=")[0]
+        if _is_sensitive_config_name(flag):
+            return True
+    return False
+
+
+def _url_contains_plaintext_auth(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = urlsplit(value)
+        if parsed.username is not None or parsed.password is not None:
+            return True
+        return any(_is_sensitive_config_name(key) for key, _ in parse_qsl(parsed.query))
+    except ValueError:
+        # URL syntax validation is not part of Task 4. Invalid URLs remain the
+        # transport layer's responsibility unless a secret carrier is found.
+        return False
+
+
+def _preflight_auth_input(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise McpConfigError("invalid MCP authentication configuration")
+    if set(value).difference(_AUTH_REFERENCE_FIELDS):
+        raise McpConfigError("invalid MCP authentication configuration")
+    reference = value.get("credential_ref")
+    if isinstance(reference, SecretStr):
+        reference = reference.get_secret_value()
+    if not isinstance(reference, str):
+        raise McpConfigError("invalid MCP authentication configuration")
+    try:
+        validate_credential_id(reference)
+    except CredentialError:
+        raise McpConfigError("invalid MCP authentication configuration") from None
+
+
+def _preflight_server_input(value: object) -> None:
+    if not isinstance(value, dict):
+        raise McpConfigError("invalid MCP server configuration")
+    if (
+        _contains_plaintext_auth_route(value)
+        or _arguments_contain_plaintext_auth(value.get("args"))
+        or _url_contains_plaintext_auth(value.get("url"))
+    ):
+        raise McpConfigError("plaintext authentication material is forbidden")
+    _preflight_auth_input(value.get("auth"))
+
+
+class _SanitizedConfigModel(BaseModel):
+    """Pydantic boundary that replaces input-retaining errors."""
+
+    @classmethod
+    def _preflight_input(cls, value: object) -> None:
+        raise NotImplementedError
+
+    @classmethod
+    def _validation_error_message(cls, value: object) -> str:
+        raise NotImplementedError
+
+    def __init__(self, /, **data: Any):
+        model_type = type(self)
+        try:
+            model_type._preflight_input(data)
+            super().__init__(**data)
+        except McpConfigError:
+            raise
+        except ValidationError:
+            raise McpConfigError(model_type._validation_error_message(data)) from None
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        if isinstance(obj, cls):
+            return obj
+        try:
+            cls._preflight_input(obj)
+            return super().model_validate(
+                obj,
+                strict=strict,
+                extra=extra,
+                from_attributes=from_attributes,
+                context=context,
+                by_alias=by_alias,
+                by_name=by_name,
+            )
+        except McpConfigError:
+            raise
+        except ValidationError:
+            raise McpConfigError(cls._validation_error_message(obj)) from None
+
+    @classmethod
+    def model_validate_json(
+        cls,
+        json_data: str | bytes | bytearray,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        parsed: object = None
+        try:
+            parsed = json.loads(json_data)
+            cls._preflight_input(parsed)
+            return super().model_validate_json(
+                json_data,
+                strict=strict,
+                extra=extra,
+                context=context,
+                by_alias=by_alias,
+                by_name=by_name,
+            )
+        except McpConfigError:
+            raise
+        except (TypeError, ValueError):
+            raise McpConfigError(cls._validation_error_message(parsed)) from None
+
+    @classmethod
+    def model_validate_strings(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        try:
+            cls._preflight_input(obj)
+            return super().model_validate_strings(
+                obj,
+                strict=strict,
+                extra=extra,
+                context=context,
+                by_alias=by_alias,
+                by_name=by_name,
+            )
+        except McpConfigError:
+            raise
+        except ValidationError:
+            raise McpConfigError(cls._validation_error_message(obj)) from None
+
+
+class McpAuthConfig(_SanitizedConfigModel):
     """References and transport settings only; never credential material."""
 
     model_config = _AUTH_MODEL_CONFIG
 
-    credential_ref: str
+    credential_ref: SecretStr
     stdio_environment: str = ""
     http_scheme: Literal["bearer", ""] = ""
 
-    @field_validator("credential_ref")
     @classmethod
-    def validate_reference(cls, value: str) -> str:
+    def _preflight_input(cls, value: object) -> None:
+        _preflight_auth_input(value)
+
+    @classmethod
+    def _validation_error_message(cls, value: object) -> str:
+        return "invalid MCP authentication configuration"
+
+    @field_validator("credential_ref", mode="before")
+    @classmethod
+    def validate_reference(cls, value: object) -> SecretStr:
+        raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if not isinstance(raw_value, str):
+            raise ValueError("invalid credential reference")
         try:
-            return validate_credential_id(value)
+            return SecretStr(validate_credential_id(raw_value))
         except CredentialError:
             raise ValueError("invalid credential reference") from None
 
@@ -124,8 +331,13 @@ class McpAuthConfig(BaseModel):
             raise ValueError("invalid stdio credential environment")
         return value
 
+    def credential_id(self) -> str:
+        """Return the identifier only at the credential lookup boundary."""
 
-class McpServerConfig(BaseModel):
+        return self.credential_ref.get_secret_value()
+
+
+class McpServerConfig(_SanitizedConfigModel):
     # Keep legacy unknown extension fields permissive for version-2
     # compatibility, but prevent Pydantic errors from echoing accidental
     # plaintext credential values.
@@ -139,6 +351,16 @@ class McpServerConfig(BaseModel):
     env: dict[str, str] | None = None
     auth: McpAuthConfig | None = None
     enabled: bool = True
+
+    @classmethod
+    def _preflight_input(cls, value: object) -> None:
+        _preflight_server_input(value)
+
+    @classmethod
+    def _validation_error_message(cls, value: object) -> str:
+        if isinstance(value, dict) and value.get("auth") is not None:
+            return "invalid MCP authentication configuration"
+        return "invalid MCP server configuration"
 
     @model_validator(mode="before")
     @classmethod
@@ -162,6 +384,39 @@ class McpServerConfig(BaseModel):
         if not valid:
             raise ValueError("invalid authentication configuration for MCP transport")
         return self
+
+
+def _sanitize_registry_servers(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate server entries before outer Pydantic models can retain input."""
+
+    registry = data.get("registry")
+    if not isinstance(registry, dict) or "mcp_servers" not in registry:
+        return data
+    raw_servers = registry["mcp_servers"]
+    if not isinstance(raw_servers, list):
+        raise McpConfigError("invalid MCP server configuration")
+    servers: list[dict[str, Any]] = []
+    for raw_server in raw_servers:
+        if isinstance(raw_server, McpServerConfig):
+            server = raw_server
+            sanitized_server = server.model_dump()
+        elif isinstance(raw_server, dict):
+            server = McpServerConfig(**raw_server)
+            # Preserve permissive version-2 extension keys while replacing
+            # the only sensitive reference with its redacting wrapper.
+            sanitized_server = dict(raw_server)
+            if server.auth is not None:
+                sanitized_auth = dict(raw_server["auth"])
+                sanitized_auth["credential_ref"] = server.auth.credential_ref
+                sanitized_server["auth"] = sanitized_auth
+        else:
+            raise McpConfigError("invalid MCP server configuration")
+        servers.append(sanitized_server)
+    sanitized_registry = dict(registry)
+    sanitized_registry["mcp_servers"] = servers
+    sanitized_data = dict(data)
+    sanitized_data["registry"] = sanitized_registry
+    return sanitized_data
 
 
 class ResolutionCategory(BaseModel):
@@ -208,6 +463,9 @@ class GlobalConfig(BaseModel):
     disclosure: DisclosureConfig = Field(default_factory=DisclosureConfig)
     resolution: ResolutionConfig = Field(default_factory=ResolutionConfig)
     profiles: ProfilesConfig | None = None
+
+    def __init__(self, /, **data: Any):
+        super().__init__(**_sanitize_registry_servers(data))
 
     @model_validator(mode="after")
     def validate_profiles_version(self) -> Self:
@@ -257,6 +515,9 @@ class ProjectConfig(BaseModel):
     registry: dict[str, Any] = Field(default_factory=dict)  # project-local defs
     disclosure: DisclosureConfig | None = None  # overrides global if present
     profiles: ProjectProfilesConfig | None = None
+
+    def __init__(self, /, **data: Any):
+        super().__init__(**_sanitize_registry_servers(data))
 
     @model_validator(mode="after")
     def validate_profiles_version(self) -> Self:
