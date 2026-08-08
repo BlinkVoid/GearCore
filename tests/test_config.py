@@ -2,14 +2,22 @@
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from gearcore_hub.config import (
     EffectiveConfig,
     GlobalConfig,
+    McpAuthConfig,
+    McpServerConfig,
     ProjectConfig,
     _default_skills_dirs,
     load_config,
 )
+from gearcore_hub.main import cmd_status
 from gearcore_hub.vendor import bundled_superpowers_dir
+
+SENTINEL = "sentinel-plaintext-token-credential-149"
 
 
 class TestGlobalConfig:
@@ -45,6 +53,221 @@ class TestGlobalConfig:
         effective = EffectiveConfig(global_cfg, None, None)
         assert len(effective.mcp_servers) == 1
         assert effective.mcp_servers[0].id == "fs"
+
+
+class TestMcpAuthConfig:
+    def test_stdio_credential_reference_is_valid(self):
+        server = McpServerConfig(
+            id="dispatcher",
+            type="stdio",
+            command="hive-dispatcher",
+            auth={
+                "credential_ref": "hive-dispatcher-operator",
+                "stdio_environment": "HIVE_DISPATCHER_CREDENTIAL",
+            },
+        )
+
+        assert isinstance(server.auth, McpAuthConfig)
+        assert server.auth.credential_ref == "hive-dispatcher-operator"
+        assert server.auth.stdio_environment == "HIVE_DISPATCHER_CREDENTIAL"
+        assert server.auth.http_scheme == ""
+
+    @pytest.mark.parametrize("transport", ["sse", "http"])
+    def test_http_credential_reference_is_valid(self, transport: str):
+        server = McpServerConfig(
+            id="dispatcher",
+            type=transport,
+            url="http://127.0.0.1/mcp",
+            auth={"credential_ref": "operator", "http_scheme": "bearer"},
+        )
+
+        assert server.auth is not None
+        assert server.auth.http_scheme == "bearer"
+
+    @pytest.mark.parametrize(
+        ("transport", "auth"),
+        [
+            (
+                "stdio",
+                {"credential_ref": "operator", "http_scheme": "bearer"},
+            ),
+            (
+                "stdio",
+                {"credential_ref": "operator", "stdio_environment": ""},
+            ),
+            (
+                "sse",
+                {
+                    "credential_ref": "operator",
+                    "stdio_environment": "TOKEN",
+                    "http_scheme": "bearer",
+                },
+            ),
+            ("sse", {"credential_ref": "operator"}),
+            ("http", {"credential_ref": "operator", "http_scheme": ""}),
+            (
+                "custom",
+                {"credential_ref": "operator", "http_scheme": "bearer"},
+            ),
+        ],
+    )
+    def test_wrong_auth_transport_combinations_are_rejected(
+        self, transport: str, auth: dict[str, str]
+    ):
+        with pytest.raises(ValidationError, match="authentication"):
+            McpServerConfig(id="dispatcher", type=transport, auth=auth)
+
+    def test_unauthenticated_v2_server_remains_compatible(self):
+        server = McpServerConfig(
+            id="legacy", type="stdio", command="legacy", legacy_extension=True
+        )
+
+        assert server.auth is None
+        assert server.command == "legacy"
+
+    @pytest.mark.parametrize(
+        "plaintext_field", ["token", "secret", "password", "authorization"]
+    )
+    def test_plaintext_top_level_credentials_are_rejected_without_echo(
+        self, plaintext_field: str
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            McpServerConfig(
+                id="dispatcher",
+                type="stdio",
+                command="hive-dispatcher",
+                **{plaintext_field: SENTINEL},
+            )
+
+        assert SENTINEL not in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "plaintext_field", ["token", "secret", "password", "authorization"]
+    )
+    def test_plaintext_nested_credentials_are_rejected_without_echo(
+        self, plaintext_field: str
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            McpServerConfig(
+                id="dispatcher",
+                type="stdio",
+                auth={
+                    "credential_ref": "operator",
+                    "stdio_environment": "TOKEN",
+                    plaintext_field: SENTINEL,
+                },
+            )
+
+        assert SENTINEL not in str(exc_info.value)
+
+    def test_plaintext_yaml_is_rejected_before_entering_config_model(
+        self, tmp_path: Path, caplog
+    ):
+        from gearcore_hub.config import load_global_config
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "version: 2\n"
+            "registry:\n"
+            "  mcp_servers:\n"
+            "    - id: dispatcher\n"
+            "      type: stdio\n"
+            f"      token: {SENTINEL}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            load_global_config(config_file)
+
+        assert SENTINEL not in str(exc_info.value)
+        assert SENTINEL not in caplog.text
+
+    def test_unknown_and_duplicate_auth_settings_are_rejected(self):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            McpServerConfig(
+                id="dispatcher",
+                type="stdio",
+                auth={
+                    "credential_ref": "operator",
+                    "stdio_environment": "TOKEN",
+                    "environment": "DUPLICATE_AUTH_CHANNEL",
+                },
+            )
+
+    def test_duplicate_yaml_auth_key_is_rejected_without_secret_log(
+        self, tmp_path: Path, caplog
+    ):
+        from gearcore_hub.config import load_global_config
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "version: 2\n"
+            "registry:\n"
+            "  mcp_servers:\n"
+            "    - id: dispatcher\n"
+            "      type: stdio\n"
+            "      auth:\n"
+            "        credential_ref: operator\n"
+            f"        credential_ref: {SENTINEL}\n"
+            "        stdio_environment: TOKEN\n",
+            encoding="utf-8",
+        )
+
+        with caplog.at_level("ERROR", logger="gearcore.config"):
+            config = load_global_config(config_file)
+
+        assert config.mcp_servers == []
+        assert "Failed to parse config" in caplog.text
+        assert SENTINEL not in caplog.text
+
+    @pytest.mark.parametrize(
+        "auth",
+        [
+            {"credential_ref": ""},
+            {"credential_ref": "   ", "stdio_environment": "TOKEN"},
+            {"credential_ref": "operator", "stdio_environment": "bad=name"},
+        ],
+    )
+    def test_auth_structure_is_strictly_validated(self, auth: dict[str, str]):
+        with pytest.raises(ValidationError):
+            McpServerConfig(id="dispatcher", type="stdio", auth=auth)
+
+    def test_secret_never_enters_config_dump_repr_status_logs_or_errors(
+        self, capsys, caplog
+    ):
+        global_cfg = GlobalConfig(
+            version=3,
+            profiles={"default": "operator", "entries": {"operator": {}}},
+            registry={
+                "mcp_servers": [
+                    {
+                        "id": "dispatcher",
+                        "type": "stdio",
+                        "command": "hive-dispatcher",
+                        "auth": {
+                            "credential_ref": "operator",
+                            "stdio_environment": "HIVE_DISPATCHER_CREDENTIAL",
+                        },
+                    }
+                ]
+            },
+        )
+        effective = EffectiveConfig(global_cfg, None, None)
+
+        cmd_status(effective)
+        rendered = "\n".join(
+            (
+                repr(global_cfg),
+                repr(effective),
+                repr(effective.mcp_servers),
+                repr(global_cfg.model_dump()),
+                repr(effective.mcp_servers[0].model_dump()),
+                capsys.readouterr().out,
+                caplog.text,
+            )
+        )
+
+        assert SENTINEL not in rendered
 
 
 class TestProjectConfig:

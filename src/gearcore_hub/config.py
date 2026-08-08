@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from gearcore_hub.credentials import CredentialError, validate_credential_id
 from gearcore_hub.profiles import (
     DisclosureConfig as ProfileDisclosureConfig,
 )
@@ -37,14 +39,79 @@ logger = logging.getLogger("gearcore.config")
 # ---------------------------------------------------------------------------
 
 
+_AUTH_MODEL_CONFIG = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PLAINTEXT_AUTH_FIELDS = {"authorization", "password", "secret", "token"}
+
+
+class McpAuthConfig(BaseModel):
+    """References and transport settings only; never credential material."""
+
+    model_config = _AUTH_MODEL_CONFIG
+
+    credential_ref: str
+    stdio_environment: str = ""
+    http_scheme: Literal["bearer", ""] = ""
+
+    @field_validator("credential_ref")
+    @classmethod
+    def validate_reference(cls, value: str) -> str:
+        try:
+            return validate_credential_id(value)
+        except CredentialError:
+            raise ValueError("invalid credential reference") from None
+
+    @field_validator("stdio_environment")
+    @classmethod
+    def validate_environment(cls, value: str) -> str:
+        if value and _ENVIRONMENT_NAME.fullmatch(value) is None:
+            raise ValueError("invalid stdio credential environment")
+        return value
+
+
 class McpServerConfig(BaseModel):
+    # Keep legacy unknown extension fields permissive for version-2
+    # compatibility, but prevent Pydantic errors from echoing accidental
+    # plaintext credential values.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     id: str
     type: str = "stdio"
     command: str = ""
     args: list[str] = Field(default_factory=list)
     url: str = ""
     env: dict[str, str] | None = None
+    auth: McpAuthConfig | None = None
     enabled: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_plaintext_auth_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            for key in value:
+                normalized = str(key).casefold().replace("-", "_")
+                if normalized in _PLAINTEXT_AUTH_FIELDS or any(
+                    normalized.endswith(f"_{suffix}")
+                    for suffix in _PLAINTEXT_AUTH_FIELDS
+                ):
+                    raise ValueError("plaintext authentication fields are forbidden")
+        return value
+
+    @model_validator(mode="after")
+    def validate_auth_transport(self) -> Self:
+        if self.auth is None:
+            return self
+        if self.type == "stdio":
+            valid = bool(self.auth.stdio_environment) and not self.auth.http_scheme
+        elif self.type in {"sse", "http"}:
+            valid = (
+                not self.auth.stdio_environment and self.auth.http_scheme == "bearer"
+            )
+        else:
+            valid = False
+        if not valid:
+            raise ValueError("invalid authentication configuration for MCP transport")
+        return self
 
 
 class ResolutionCategory(BaseModel):
@@ -84,6 +151,8 @@ def _default_skills_dirs() -> list[Path]:
 class GlobalConfig(BaseModel):
     """Schema for ~/.config/gearcore/config.yaml"""
 
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     version: Literal[2, 3] = 2
     registry: dict[str, Any] = Field(default_factory=dict)
     disclosure: DisclosureConfig = Field(default_factory=DisclosureConfig)
@@ -96,6 +165,8 @@ class GlobalConfig(BaseModel):
             raise ValueError("profiles are required for configuration version 3")
         if self.version == 2 and self.profiles is not None:
             raise ValueError("profiles require configuration version 3")
+        for raw_server in self.registry.get("mcp_servers", []):
+            McpServerConfig.model_validate(raw_server)
         return self
 
     @property
@@ -128,6 +199,8 @@ class ProjectContext(BaseModel):
 class ProjectConfig(BaseModel):
     """Schema for <project>/.gearcore/config.yaml"""
 
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     version: Literal[2, 3] = 2
     context: ProjectContext = Field(default_factory=ProjectContext)
     scope: ProjectScope = Field(default_factory=ProjectScope)
@@ -139,6 +212,8 @@ class ProjectConfig(BaseModel):
     def validate_profiles_version(self) -> Self:
         if self.version == 2 and self.profiles is not None:
             raise ValueError("project profile overlays require configuration version 3")
+        for raw_server in self.registry.get("mcp_servers", []):
+            McpServerConfig.model_validate(raw_server)
         return self
 
     @property
@@ -518,17 +593,56 @@ GLOBAL_CONFIG_PATH = Path.home() / ".config" / "gearcore" / "config.yaml"
 PROJECT_CONFIG_NAME = ".gearcore"
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects ambiguous duplicate mapping keys."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    result: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in result
+        except TypeError:
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                "unhashable mapping key",
+                key_node.start_mark,
+            ) from None
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                "duplicate mapping key",
+                key_node.start_mark,
+            )
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     try:
         with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+            data = yaml.load(f, Loader=_UniqueKeyLoader) or {}
         logger.debug("Loaded config from %s", path)
         return data
     except FileNotFoundError:
         logger.debug("Config not found at %s, skipping", path)
         return {}
-    except Exception as exc:
-        logger.error("Failed to parse config at %s: %s", path, exc)
+    except Exception:
+        # Parser exceptions can contain source-line excerpts. Never include
+        # those excerpts because malformed YAML may contain a plaintext secret.
+        logger.error("Failed to parse config at %s", path)
         return {}
 
 
