@@ -159,6 +159,13 @@ def test_rejects_missing_credential_without_path_leakage(tmp_path: Path):
     message = str(exc_info.value)
     assert "secret-missing-id" not in message
     assert "secret-credential-root" not in message
+    graph: list[str] = []
+    current: BaseException | None = exc_info.value
+    while current is not None:
+        graph.extend((str(current), repr(current)))
+        current = current.__cause__ or current.__context__
+    assert "secret-missing-id" not in "\n".join(graph)
+    assert "secret-credential-root" not in "\n".join(graph)
 
 
 @pytest.mark.parametrize("contents", ["", "\n", " \t\r\n"])

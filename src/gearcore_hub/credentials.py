@@ -80,6 +80,8 @@ class CredentialStore:
 
         root_fd: int | None = None
         credential_fd: int | None = None
+        failure_message: str | None = None
+        value = ""
         try:
             root_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
             root_fd = os.open(self.root, root_flags)
@@ -100,15 +102,17 @@ class CredentialStore:
         except CredentialError:
             raise
         except UnicodeError:
-            raise CredentialError("credential encoding is invalid") from None
+            failure_message = "credential encoding is invalid"
         except (OSError, TypeError, ValueError):
-            raise CredentialError("credential unavailable") from None
+            failure_message = "credential unavailable"
         finally:
             if credential_fd is not None:
                 os.close(credential_fd)
             if root_fd is not None:
                 os.close(root_fd)
 
+        if failure_message is not None:
+            raise CredentialError(failure_message)
         if not value:
             raise CredentialError("empty credential")
         return SecretStr(value)

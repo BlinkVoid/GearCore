@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Self
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import yaml
 from pydantic import (
@@ -55,22 +55,11 @@ _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _AUTH_REFERENCE_FIELDS = {"credential_ref", "http_scheme", "stdio_environment"}
 _SENSITIVE_NAME_PARTS = {
     "auth",
-    "authorization",
-    "bearer",
-    "credential",
-    "credentials",
-    "password",
-    "pat",
-    "secret",
-    "token",
-}
-_SAFE_REFERENCE_SUFFIXES = {"file", "path", "ref"}
-_SENSITIVE_CARRIER_SUFFIXES = {"header", "value"}
-_SENSITIVE_COMPACT_SUFFIXES = (
+    "accesskey",
     "apikey",
-    "auth",
     "authorization",
     "bearer",
+    "cookie",
     "credential",
     "credentials",
     "password",
@@ -78,7 +67,10 @@ _SENSITIVE_COMPACT_SUFFIXES = (
     "privatekey",
     "secret",
     "token",
-)
+}
+_SAFE_REFERENCE_SUFFIXES = {"file", "path", "ref"}
+_SENSITIVE_CARRIER_SUFFIXES = {"header", "value"}
+_SENSITIVE_SEGMENT_PAIRS = {("access", "key"), ("api", "key"), ("private", "key")}
 
 
 class McpConfigError(ValueError):
@@ -99,49 +91,82 @@ def _is_sensitive_config_name(name: object) -> bool:
     parts = tuple(part for part in re.split(r"[^a-z0-9]+", normalized) if part)
     if not parts or parts[-1] in _SAFE_REFERENCE_SUFFIXES:
         return False
-    compact = "".join(parts)
     return (
         parts[-1] in _SENSITIVE_NAME_PARTS
         or (
             parts[-1] in _SENSITIVE_CARRIER_SUFFIXES
             and bool(_SENSITIVE_NAME_PARTS.intersection(parts[:-1]))
         )
-        or any(compact.endswith(suffix) for suffix in _SENSITIVE_COMPACT_SUFFIXES)
         or any(
-            pair == ("api", "key") for pair in zip(parts, parts[1:], strict=False)
+            pair in _SENSITIVE_SEGMENT_PAIRS
+            for pair in zip(parts, parts[1:], strict=False)
         )
     )
 
 
-def _contains_plaintext_auth_route(value: object, *, in_auth: bool = False) -> bool:
+def _contains_plaintext_auth_route(
+    value: object, *, typed_auth: bool = False, server_root: bool = False
+) -> bool:
     """Inspect server mappings without retaining or rendering their values."""
 
     if isinstance(value, dict):
         for key, nested in value.items():
             normalized_key = str(key).casefold().replace("-", "_")
-            is_auth_container = normalized_key == "auth" and not in_auth
+            is_typed_auth_container = server_root and normalized_key == "auth"
             if (
-                not is_auth_container
-                and not (in_auth and normalized_key in _AUTH_REFERENCE_FIELDS)
-                and _is_sensitive_config_name(key)
+                not is_typed_auth_container
+                and not (typed_auth and normalized_key in _AUTH_REFERENCE_FIELDS)
+                and (
+                    normalized_key == "credential_ref"
+                    or _is_sensitive_config_name(key)
+                )
             ):
                 return True
-            child_is_auth = is_auth_container
-            if _contains_plaintext_auth_route(nested, in_auth=child_is_auth):
+            if _contains_plaintext_auth_route(
+                nested,
+                typed_auth=is_typed_auth_container,
+                server_root=False,
+            ):
                 return True
     elif isinstance(value, (list, tuple)):
         return any(_contains_plaintext_auth_route(item) for item in value)
     return False
 
 
+def _header_contains_plaintext_auth(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    decoded = unquote(value).lstrip("=")
+    name, separator, header_value = decoded.partition(":")
+    if not separator:
+        return False
+    return _is_sensitive_config_name(name) or header_value.lstrip().casefold().startswith(
+        "bearer "
+    )
+
+
 def _arguments_contain_plaintext_auth(value: object) -> bool:
     if not isinstance(value, (list, tuple)):
         return False
-    for argument in value:
-        if not isinstance(argument, str) or not argument.startswith("--"):
+    for index, argument in enumerate(value):
+        if not isinstance(argument, str):
             continue
-        flag = argument[2:].partition("=")[0]
-        if _is_sensitive_config_name(flag):
+        if argument in {"--header", "-H"}:
+            header = value[index + 1] if index + 1 < len(value) else None
+            if _header_contains_plaintext_auth(header):
+                return True
+            continue
+        if argument.startswith("--header="):
+            if _header_contains_plaintext_auth(argument.partition("=")[2]):
+                return True
+            continue
+        if argument.startswith("-H") and len(argument) > 2:
+            if _header_contains_plaintext_auth(argument[2:]):
+                return True
+            continue
+        if argument.startswith("--") and _is_sensitive_config_name(
+            argument[2:].partition("=")[0]
+        ):
             return True
     return False
 
@@ -149,15 +174,27 @@ def _arguments_contain_plaintext_auth(value: object) -> bool:
 def _url_contains_plaintext_auth(value: object) -> bool:
     if not isinstance(value, str) or not value:
         return False
+    invalid = False
     try:
         parsed = urlsplit(value)
+        if (
+            parsed.scheme.casefold() not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.hostname is None
+        ):
+            invalid = True
+        # Access validates a malformed/non-numeric port eagerly.
+        _ = parsed.port
         if parsed.username is not None or parsed.password is not None:
             return True
-        return any(_is_sensitive_config_name(key) for key, _ in parse_qsl(parsed.query))
+        if any(_is_sensitive_config_name(key) for key, _ in parse_qsl(parsed.query)):
+            return True
     except ValueError:
-        # URL syntax validation is not part of Task 4. Invalid URLs remain the
-        # transport layer's responsibility unless a secret carrier is found.
-        return False
+        invalid = True
+    if invalid:
+        # Malformed authority syntax can obscure userinfo or query boundaries.
+        raise McpConfigError("invalid MCP server URL")
+    return False
 
 
 def _preflight_auth_input(value: object) -> None:
@@ -172,22 +209,13 @@ def _preflight_auth_input(value: object) -> None:
         reference = reference.get_secret_value()
     if not isinstance(reference, str):
         raise McpConfigError("invalid MCP authentication configuration")
+    invalid_reference = False
     try:
         validate_credential_id(reference)
     except CredentialError:
-        raise McpConfigError("invalid MCP authentication configuration") from None
-
-
-def _preflight_server_input(value: object) -> None:
-    if not isinstance(value, dict):
-        raise McpConfigError("invalid MCP server configuration")
-    if (
-        _contains_plaintext_auth_route(value)
-        or _arguments_contain_plaintext_auth(value.get("args"))
-        or _url_contains_plaintext_auth(value.get("url"))
-    ):
-        raise McpConfigError("plaintext authentication material is forbidden")
-    _preflight_auth_input(value.get("auth"))
+        invalid_reference = True
+    if invalid_reference:
+        raise McpConfigError("invalid MCP authentication configuration")
 
 
 class _SanitizedConfigModel(BaseModel):
@@ -203,13 +231,14 @@ class _SanitizedConfigModel(BaseModel):
 
     def __init__(self, /, **data: Any):
         model_type = type(self)
+        model_type._preflight_input(data)
+        validation_failed = False
         try:
-            model_type._preflight_input(data)
             super().__init__(**data)
-        except McpConfigError:
-            raise
         except ValidationError:
-            raise McpConfigError(model_type._validation_error_message(data)) from None
+            validation_failed = True
+        if validation_failed:
+            raise McpConfigError(model_type._validation_error_message(data))
 
     @classmethod
     def model_validate(
@@ -225,8 +254,9 @@ class _SanitizedConfigModel(BaseModel):
     ) -> Self:
         if isinstance(obj, cls):
             return obj
+        cls._preflight_input(obj)
+        validation_failed = False
         try:
-            cls._preflight_input(obj)
             return super().model_validate(
                 obj,
                 strict=strict,
@@ -236,10 +266,11 @@ class _SanitizedConfigModel(BaseModel):
                 by_alias=by_alias,
                 by_name=by_name,
             )
-        except McpConfigError:
-            raise
         except ValidationError:
-            raise McpConfigError(cls._validation_error_message(obj)) from None
+            validation_failed = True
+        if validation_failed:
+            raise McpConfigError(cls._validation_error_message(obj))
+        raise AssertionError("unreachable sanitized model validation state")
 
     @classmethod
     def model_validate_json(
@@ -253,9 +284,16 @@ class _SanitizedConfigModel(BaseModel):
         by_name: bool | None = None,
     ) -> Self:
         parsed: object = None
+        validation_failed = False
         try:
             parsed = json.loads(json_data)
-            cls._preflight_input(parsed)
+        except (TypeError, ValueError):
+            validation_failed = True
+        if validation_failed:
+            raise McpConfigError(cls._validation_error_message(parsed))
+        cls._preflight_input(parsed)
+        validation_failed = False
+        try:
             return super().model_validate_json(
                 json_data,
                 strict=strict,
@@ -264,10 +302,11 @@ class _SanitizedConfigModel(BaseModel):
                 by_alias=by_alias,
                 by_name=by_name,
             )
-        except McpConfigError:
-            raise
-        except (TypeError, ValueError):
-            raise McpConfigError(cls._validation_error_message(parsed)) from None
+        except ValidationError:
+            validation_failed = True
+        if validation_failed:
+            raise McpConfigError(cls._validation_error_message(parsed))
+        raise AssertionError("unreachable sanitized JSON validation state")
 
     @classmethod
     def model_validate_strings(
@@ -280,8 +319,9 @@ class _SanitizedConfigModel(BaseModel):
         by_alias: bool | None = None,
         by_name: bool | None = None,
     ) -> Self:
+        cls._preflight_input(obj)
+        validation_failed = False
         try:
-            cls._preflight_input(obj)
             return super().model_validate_strings(
                 obj,
                 strict=strict,
@@ -290,10 +330,11 @@ class _SanitizedConfigModel(BaseModel):
                 by_alias=by_alias,
                 by_name=by_name,
             )
-        except McpConfigError:
-            raise
         except ValidationError:
-            raise McpConfigError(cls._validation_error_message(obj)) from None
+            validation_failed = True
+        if validation_failed:
+            raise McpConfigError(cls._validation_error_message(obj))
+        raise AssertionError("unreachable sanitized strings validation state")
 
 
 class McpAuthConfig(_SanitizedConfigModel):
@@ -337,6 +378,20 @@ class McpAuthConfig(_SanitizedConfigModel):
         return self.credential_ref.get_secret_value()
 
 
+def _preflight_server_input(value: object) -> None:
+    if not isinstance(value, dict):
+        raise McpConfigError("invalid MCP server configuration")
+    if (
+        _contains_plaintext_auth_route(value, server_root=True)
+        or _arguments_contain_plaintext_auth(value.get("args"))
+        or _url_contains_plaintext_auth(value.get("url"))
+    ):
+        raise McpConfigError("plaintext authentication material is forbidden")
+    auth = value.get("auth")
+    if not isinstance(auth, McpAuthConfig):
+        _preflight_auth_input(auth)
+
+
 class McpServerConfig(_SanitizedConfigModel):
     # Keep legacy unknown extension fields permissive for version-2
     # compatibility, but prevent Pydantic errors from echoing accidental
@@ -365,7 +420,7 @@ class McpServerConfig(_SanitizedConfigModel):
     @model_validator(mode="before")
     @classmethod
     def reject_plaintext_auth_fields(cls, value: Any) -> Any:
-        if _contains_plaintext_auth_route(value):
+        if _contains_plaintext_auth_route(value, server_root=True):
             raise ValueError("plaintext authentication fields are forbidden")
         return value
 
@@ -406,7 +461,12 @@ def _sanitize_registry_servers(data: dict[str, Any]) -> dict[str, Any]:
             # the only sensitive reference with its redacting wrapper.
             sanitized_server = dict(raw_server)
             if server.auth is not None:
-                sanitized_auth = dict(raw_server["auth"])
+                raw_auth = raw_server["auth"]
+                sanitized_auth = (
+                    dict(raw_auth)
+                    if isinstance(raw_auth, dict)
+                    else server.auth.model_dump()
+                )
                 sanitized_auth["credential_ref"] = server.auth.credential_ref
                 sanitized_server["auth"] = sanitized_auth
         else:
@@ -417,6 +477,87 @@ def _sanitize_registry_servers(data: dict[str, Any]) -> dict[str, Any]:
     sanitized_data = dict(data)
     sanitized_data["registry"] = sanitized_registry
     return sanitized_data
+
+
+class _SanitizedRegistryConfigModel(BaseModel):
+    """Outer config boundary that redacts server references before validation."""
+
+    def __init__(self, /, **data: Any):
+        super().__init__(**_sanitize_registry_servers(data))
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        if isinstance(obj, cls):
+            return obj
+        sanitized = _sanitize_registry_servers(obj) if isinstance(obj, dict) else obj
+        return super().model_validate(
+            sanitized,
+            strict=strict,
+            extra=extra,
+            from_attributes=from_attributes,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
+
+    @classmethod
+    def model_validate_json(
+        cls,
+        json_data: str | bytes | bytearray,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        parsed: object = None
+        parse_failed = False
+        try:
+            parsed = json.loads(json_data)
+        except (TypeError, ValueError):
+            parse_failed = True
+        if parse_failed:
+            raise McpConfigError("invalid configuration document")
+        return cls.model_validate(
+            parsed,
+            strict=strict,
+            extra=extra,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
+
+    @classmethod
+    def model_validate_strings(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        sanitized = _sanitize_registry_servers(obj) if isinstance(obj, dict) else obj
+        return super().model_validate_strings(
+            sanitized,
+            strict=strict,
+            extra=extra,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
 
 
 class ResolutionCategory(BaseModel):
@@ -453,7 +594,7 @@ def _default_skills_dirs() -> list[Path]:
     return dirs
 
 
-class GlobalConfig(BaseModel):
+class GlobalConfig(_SanitizedRegistryConfigModel):
     """Schema for ~/.config/gearcore/config.yaml"""
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -463,9 +604,6 @@ class GlobalConfig(BaseModel):
     disclosure: DisclosureConfig = Field(default_factory=DisclosureConfig)
     resolution: ResolutionConfig = Field(default_factory=ResolutionConfig)
     profiles: ProfilesConfig | None = None
-
-    def __init__(self, /, **data: Any):
-        super().__init__(**_sanitize_registry_servers(data))
 
     @model_validator(mode="after")
     def validate_profiles_version(self) -> Self:
@@ -504,7 +642,7 @@ class ProjectContext(BaseModel):
     description: str = ""
 
 
-class ProjectConfig(BaseModel):
+class ProjectConfig(_SanitizedRegistryConfigModel):
     """Schema for <project>/.gearcore/config.yaml"""
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -515,9 +653,6 @@ class ProjectConfig(BaseModel):
     registry: dict[str, Any] = Field(default_factory=dict)  # project-local defs
     disclosure: DisclosureConfig | None = None  # overrides global if present
     profiles: ProjectProfilesConfig | None = None
-
-    def __init__(self, /, **data: Any):
-        super().__init__(**_sanitize_registry_servers(data))
 
     @model_validator(mode="after")
     def validate_profiles_version(self) -> Self:

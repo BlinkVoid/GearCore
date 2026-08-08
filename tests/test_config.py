@@ -1,5 +1,6 @@
 """Tests for the layered configuration loader."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -22,11 +23,31 @@ SENTINEL = "sentinel-plaintext-token-credential-149"
 
 
 def _assert_exception_does_not_retain(exc: BaseException, sentinel: str) -> None:
-    rendered = [str(exc), repr(exc)]
-    if hasattr(exc, "errors"):
-        rendered.append(repr(exc.errors()))
-    if hasattr(exc, "json"):
-        rendered.append(exc.json())
+    rendered: list[str] = []
+    pending: list[object] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        rendered.extend((str(current), repr(current)))
+        if isinstance(current, BaseException):
+            if current.__cause__ is not None:
+                pending.append(current.__cause__)
+            if current.__context__ is not None:
+                pending.append(current.__context__)
+            if hasattr(current, "errors"):
+                errors = current.errors()
+                rendered.append(repr(errors))
+                pending.append(errors)
+            if hasattr(current, "json"):
+                rendered.append(current.json())
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+        elif isinstance(current, (list, tuple, set)):
+            pending.extend(current)
     assert sentinel not in "\n".join(rendered)
 
 
@@ -105,6 +126,22 @@ class TestMcpAuthConfig:
             )
         )
         assert SENTINEL not in rendered
+
+    def test_prevalidated_auth_model_remains_composable(self):
+        auth = McpAuthConfig(
+            credential_ref=SENTINEL,
+            stdio_environment="HIVE_AUTH",
+        )
+
+        server = McpServerConfig(id="dispatcher", type="stdio", auth=auth)
+        global_config = GlobalConfig(
+            registry={"mcp_servers": [{"id": "dispatcher", "auth": auth}]}
+        )
+
+        assert server.auth is auth
+        assert global_config.mcp_servers[0].auth is not None
+        assert global_config.mcp_servers[0].auth.credential_id() == SENTINEL
+        assert SENTINEL not in repr(global_config.model_dump())
 
     @pytest.mark.parametrize("transport", ["sse", "http"])
     def test_http_credential_reference_is_valid(self, transport: str):
@@ -280,6 +317,10 @@ class TestMcpAuthConfig:
             ["--password", SENTINEL],
             ["--auth", SENTINEL],
             [f"--bearer={SENTINEL}"],
+            ["--header", f"Authorization: Bearer {SENTINEL}"],
+            ["-H", f"authorization: bearer {SENTINEL}"],
+            [f"--header=Authorization%3A%20Bearer%20{SENTINEL}"],
+            [f"-HX-API-Key: {SENTINEL}"],
         ],
     )
     def test_secret_bearing_arguments_are_rejected_without_retention(
@@ -296,6 +337,8 @@ class TestMcpAuthConfig:
             ["--token-file", "/safe/token"],
             ["--password-policy", "strict"],
             ["--config", "/safe/config.yaml"],
+            ["--header", "Accept: application/json"],
+            ["-H", "X-Mode: operator"],
         ],
     )
     def test_normal_and_reference_arguments_are_accepted(self, args: list[str]):
@@ -312,6 +355,8 @@ class TestMcpAuthConfig:
             f"https://example.test/mcp?api_key={SENTINEL}",
             f"https://example.test/mcp?access_token={SENTINEL}",
             f"https://example.test/mcp?auth={SENTINEL}",
+            f"https://example.test/mcp?API%5FTOKEN={SENTINEL}",
+            f"http://[bad?token={SENTINEL}",
         ],
     )
     def test_url_userinfo_and_sensitive_query_are_rejected_without_retention(
@@ -350,6 +395,23 @@ class TestMcpAuthConfig:
         assert SENTINEL not in repr(exc_info.value)
         _assert_exception_does_not_retain(exc_info.value, SENTINEL)
 
+    def test_nested_legacy_auth_container_cannot_claim_typed_reference_safety(self):
+        payload = {
+            "id": "legacy",
+            "type": "stdio",
+            "metadata": {"auth": {"credential_ref": SENTINEL}},
+        }
+
+        with pytest.raises(McpConfigError) as exc_info:
+            McpServerConfig(**payload)
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
+        for config_type in (GlobalConfig, ProjectConfig):
+            with pytest.raises(McpConfigError) as outer_exc:
+                config_type(registry={"mcp_servers": [payload]})
+            _assert_exception_does_not_retain(outer_exc.value, SENTINEL)
+
     def test_legitimate_nonsecret_environment_and_v2_extra_remain_compatible(self):
         server = McpServerConfig(
             id="legacy",
@@ -383,6 +445,45 @@ class TestMcpAuthConfig:
             global_config.registry["mcp_servers"][0]["legacy_extension"]
             == "retained-v2-input"
         )
+
+    @pytest.mark.parametrize(
+        "safe_name",
+        ["COMPAT", "APP_COMPAT", "NOAUTH", "OAUTH"],
+    )
+    def test_sensitive_alias_matching_has_no_compact_suffix_false_positives(
+        self, safe_name: str
+    ):
+        server = McpServerConfig(
+            id="legacy", type="stdio", env={safe_name: "enabled"}
+        )
+
+        assert server.env == {safe_name: "enabled"}
+
+    @pytest.mark.parametrize("config_type", [GlobalConfig, ProjectConfig])
+    @pytest.mark.parametrize(
+        "entrypoint",
+        ["constructor", "model_validate", "model_validate_json", "model_validate_strings"],
+    )
+    def test_outer_config_entrypoints_return_sentinel_free_exception_graphs(
+        self, config_type, entrypoint: str
+    ):
+        payload = {
+            "registry": {
+                "mcp_servers": [
+                    {"id": "legacy", "type": "stdio", "API_TOKEN": SENTINEL}
+                ]
+            }
+        }
+
+        with pytest.raises(McpConfigError) as exc_info:
+            if entrypoint == "constructor":
+                config_type(**payload)
+            elif entrypoint == "model_validate_json":
+                config_type.model_validate_json(json.dumps(payload))
+            else:
+                getattr(config_type, entrypoint)(payload)
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
 
     @pytest.mark.parametrize(
         "plaintext_field",
@@ -506,6 +607,23 @@ class TestMcpAuthConfig:
                     "stdio_environment": "HIVE_AUTH",
                 },
             )
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
+    @pytest.mark.parametrize("model_type", [McpAuthConfig, McpServerConfig])
+    def test_inner_pydantic_failure_has_sentinel_free_exception_graph(
+        self, model_type
+    ):
+        auth = {
+            "credential_ref": SENTINEL,
+            "stdio_environment": f"BAD={SENTINEL}",
+        }
+
+        with pytest.raises(McpConfigError) as exc_info:
+            if model_type is McpAuthConfig:
+                model_type(**auth)
+            else:
+                model_type(id="dispatcher", type="stdio", auth=auth)
 
         _assert_exception_does_not_retain(exc_info.value, SENTINEL)
 
