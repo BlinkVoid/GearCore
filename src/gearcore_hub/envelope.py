@@ -14,7 +14,7 @@ from typing import Any, Self
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from gearcore_hub.profiles import CapabilityList, ProfileConfig
 
@@ -45,6 +45,20 @@ class _LaunchEnvelope(BaseModel):
     nonce: str = Field(min_length=1)
     signature: str = Field(min_length=1)
 
+    @field_validator(
+        "profile",
+        "issuer",
+        "launch_id",
+        "execution_id",
+        "task_id",
+        "nonce",
+    )
+    @classmethod
+    def reject_blank_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("blank envelope identity")
+        return value
+
     @model_validator(mode="after")
     def validate_version_and_time_order(self) -> Self:
         if self.version != 1 or self.expires_at <= self.issued_at:
@@ -58,6 +72,13 @@ class _PublicKeyDocument(BaseModel):
     version: int
     issuer: str = Field(min_length=1)
     public_key: str = Field(min_length=1)
+
+    @field_validator("issuer")
+    @classmethod
+    def reject_blank_issuer(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("blank public-key issuer")
+        return value
 
     @model_validator(mode="after")
     def validate_version(self) -> Self:
@@ -203,9 +224,59 @@ def _capability_policy_is_subset(
     return candidate_allowed.issubset(enforced_allowed)
 
 
-def profile_is_subset(candidate: ProfileConfig, enforced: ProfileConfig) -> bool:
+def _apply_project_overlay(
+    policy: CapabilityList, overlay: CapabilityList | None
+) -> CapabilityList:
+    if overlay is None:
+        return policy
+
+    include = policy.include
+    if overlay.include is not None:
+        if include is None:
+            include = overlay.include
+        else:
+            overlay_include = set(overlay.include)
+            include = tuple(
+                capability_id
+                for capability_id in include
+                if capability_id in overlay_include
+            )
+    return CapabilityList(
+        include=include,
+        deny=tuple(dict.fromkeys((*policy.deny, *overlay.deny))),
+        protected=policy.protected,
+    )
+
+
+def profile_is_subset(
+    candidate: ProfileConfig,
+    enforced: ProfileConfig,
+    *,
+    candidate_overlay: ProfileConfig | None = None,
+    enforced_overlay: ProfileConfig | None = None,
+) -> bool:
     """Return whether a profile can only narrow an envelope-enforced profile."""
 
     return _capability_policy_is_subset(
-        candidate.scope.mcp_servers, enforced.scope.mcp_servers
-    ) and _capability_policy_is_subset(candidate.scope.skills, enforced.scope.skills)
+        _apply_project_overlay(
+            candidate.scope.mcp_servers,
+            None
+            if candidate_overlay is None
+            else candidate_overlay.scope.mcp_servers,
+        ),
+        _apply_project_overlay(
+            enforced.scope.mcp_servers,
+            None
+            if enforced_overlay is None
+            else enforced_overlay.scope.mcp_servers,
+        ),
+    ) and _capability_policy_is_subset(
+        _apply_project_overlay(
+            candidate.scope.skills,
+            None if candidate_overlay is None else candidate_overlay.scope.skills,
+        ),
+        _apply_project_overlay(
+            enforced.scope.skills,
+            None if enforced_overlay is None else enforced_overlay.scope.skills,
+        ),
+    )

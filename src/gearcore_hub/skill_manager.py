@@ -87,6 +87,8 @@ class SkillManager:
         self.skills.clear()
         self.broken_skills.clear()
         self._diagnostic_codes.clear()
+        if self.config.diagnostic_only:
+            return
         project_local_dir: Path | None = None
         if self.config.project_root is not None:
             project_local_dir = self.config.project_root / ".gearcore" / "skills"

@@ -135,7 +135,11 @@ class GearCoreHub:
 
             if name == "list_skills":
                 skills = self.skill_manager.list_available_skills()
-                ctx = self.config.context_name
+                ctx = (
+                    "diagnostic-only"
+                    if self.config.diagnostic_only
+                    else self.config.context_name
+                )
                 lines = [f"GearCore skills ({ctx} context):\n"]
                 for s in skills:
                     tag = "[active]" if s["status"] == "active" else ""
@@ -256,24 +260,33 @@ class GearCoreHub:
 
 
 def cmd_status(config: EffectiveConfig):
+    if config.diagnostic_only:
+        print("\nGearCore — diagnostic-only")
+        print("  Active server IDs: (none)")
+        print("  Denied server IDs: (none)")
+        print(f"  Capability diagnostic: {', '.join(config.diagnostic_codes)}")
+        print()
+        return
+
     print(f"\nGearCore — context: {config.context_name}")
     print(f"  Profile: {config.profile_name}")
     print(f"  Profile source: {config.profile_source}")
+    if config.enforced_profile_name is not None:
+        print(f"  Enforced profile: {config.enforced_profile_name}")
     is_constrained = (
         config.profile.constrained or config.enforced_profile_name is not None
     )
     print(f"  Constrained: {is_constrained}")
-    if config.diagnostic_only:
-        print(f"  Capability diagnostic: {', '.join(config.diagnostic_codes)}")
-        print()
-        return
+    active_ids = ", ".join(config.active_mcp_server_ids) or "(none)"
+    denied_ids = ", ".join(config.denied_mcp_server_ids) or "(none)"
+    print(f"  Active server IDs: {active_ids}")
+    print(f"  Denied server IDs: {denied_ids}")
     if config.project_root:
         print(f"  Project root: {config.project_root}")
 
     print("\nMCP servers (effective):")
     for s in config.mcp_servers:
-        addr = s.command if s.type == "stdio" else s.url
-        print(f"  [{s.type}] {s.id} — {addr}")
+        print(f"  [{s.type}] {s.id}")
 
     print("\nSkills dirs:")
     for d in config.skills_dirs:
@@ -311,7 +324,7 @@ def cmd_status(config: EffectiveConfig):
 def cmd_list_skills(config: EffectiveConfig):
     sm = SkillManager(config)
     skills = sm.list_available_skills()
-    ctx = config.context_name
+    ctx = "diagnostic-only" if config.diagnostic_only else config.context_name
     print(f"GearCore skills ({ctx} context):\n")
     if not skills:
         print("  (no skills visible in this context)")

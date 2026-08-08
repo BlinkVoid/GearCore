@@ -383,6 +383,14 @@ class EffectiveConfig:
         return [server.model_copy(deep=True) for server in self._mcp_servers]
 
     @property
+    def active_mcp_server_ids(self) -> tuple[str, ...]:
+        return tuple(server.id for server in self._mcp_servers)
+
+    @property
+    def denied_mcp_server_ids(self) -> tuple[str, ...]:
+        return self._mcp_capabilities.denied
+
+    @property
     def diagnostic_codes(self) -> tuple[str, ...]:
         return tuple(
             dict.fromkeys(
@@ -401,6 +409,8 @@ class EffectiveConfig:
 
     @property
     def skills_dirs(self) -> list[Path]:
+        if self.diagnostic_only:
+            return []
         dirs: list[Path] = list(self.global_cfg.skills_dirs)
         if self.project_root is not None:
             local = self.project_root / ".gearcore" / "skills"
@@ -589,8 +599,22 @@ def load_config(
         enforced_profile = profiles.entries[verified.profile]
         selected_profile_name = profile_name or verified.profile
         selected_profile = profiles.entries.get(selected_profile_name)
+        candidate_overlay: ProfileConfig | None = None
+        enforced_overlay: ProfileConfig | None = None
+        if (
+            project_cfg is not None
+            and project_cfg.version == 3
+            and project_cfg.profiles is not None
+        ):
+            candidate_overlay = project_cfg.profiles.entries.get(
+                selected_profile_name
+            )
+            enforced_overlay = project_cfg.profiles.entries.get(verified.profile)
         if selected_profile is None or not profile_is_subset(
-            selected_profile, enforced_profile
+            selected_profile,
+            enforced_profile,
+            candidate_overlay=candidate_overlay,
+            enforced_overlay=enforced_overlay,
         ):
             return EffectiveConfig(
                 global_cfg,

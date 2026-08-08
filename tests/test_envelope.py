@@ -16,8 +16,9 @@ from mcp.types import ListToolsRequest
 
 from gearcore_hub.config import load_config
 from gearcore_hub.envelope import canonical_envelope_bytes
-from gearcore_hub.main import GearCoreHub, cmd_call, cmd_status
+from gearcore_hub.main import GearCoreHub, cmd_call, cmd_list_skills, cmd_status
 from gearcore_hub.main import main as cli_main
+from gearcore_hub.skill_manager import SkillManager
 
 NOW = 1_800_000_000
 ISSUER = "test-worker-spawner"
@@ -350,6 +351,7 @@ def test_valid_envelope_allows_requested_profile_only_when_it_is_narrower(
         envelope_path,
         public_key_path,
         profile="observer",
+        project=tmp_path,
     )
 
     assert result.diagnostic_only is False
@@ -471,6 +473,218 @@ def test_alternate_profile_cannot_drop_envelope_protected_binding(
     assert result.enforced_profile_name == "protected-worker"
     assert result.mcp_servers == []
     assert result.diagnostic_codes == ("envelope_authority_expansion",)
+
+
+@pytest.mark.parametrize("overlay_rule", ["include", "deny"])
+def test_alternate_profile_cannot_regain_capabilities_removed_by_enforced_overlay(
+    tmp_path: Path, signing_material, overlay_rule: str
+):
+    private_key, public_key_path = signing_material
+    config_path = tmp_path / "overlay-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 3,
+                "registry": {
+                    "mcp_servers": [
+                        {"id": "gateway", "command": "/trusted/gateway"},
+                        {"id": "common", "command": "/trusted/common"},
+                    ]
+                },
+                "profiles": {
+                    "default": "operator",
+                    "entries": {
+                        "operator": {},
+                        "worker": {
+                            "constrained": True,
+                            "scope": {
+                                "mcp_servers": {
+                                    "include": ["gateway", "common"]
+                                },
+                                "skills": {
+                                    "include": ["worker-skill", "common-skill"]
+                                },
+                            },
+                        },
+                        "alternate": {
+                            "constrained": True,
+                            "scope": {
+                                "mcp_servers": {"include": ["common"]},
+                                "skills": {"include": ["common-skill"]},
+                            },
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_rules = (
+        {
+            "mcp_servers": {"include": ["gateway"]},
+            "skills": {"include": ["worker-skill"]},
+        }
+        if overlay_rule == "include"
+        else {
+            "mcp_servers": {"deny": ["common"]},
+            "skills": {"deny": ["common-skill"]},
+        }
+    )
+    project = tmp_path / "overlay-project"
+    project_config = project / ".gearcore" / "config.yaml"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text(
+        yaml.safe_dump(
+            {
+                "version": 3,
+                "profiles": {
+                    "entries": {
+                        "worker": {"scope": worker_rules},
+                        "alternate": {
+                            "scope": {
+                                "mcp_servers": {"include": ["common"]},
+                                "skills": {"include": ["common-skill"]},
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    envelope_path, _ = _signed_envelope(tmp_path, private_key, profile="worker")
+
+    result = _load(
+        config_path,
+        envelope_path,
+        public_key_path,
+        profile="alternate",
+        project=project,
+    )
+
+    assert result.diagnostic_only is True
+    assert result.profile_source == "envelope"
+    assert result.enforced_profile_name == "worker"
+    assert result.mcp_servers == []
+    assert result.diagnostic_codes == ("envelope_authority_expansion",)
+
+
+@pytest.mark.parametrize(
+    "identity_field",
+    ["profile", "issuer", "launch_id", "execution_id", "task_id", "nonce"],
+)
+def test_correctly_signed_whitespace_identity_fields_fail_closed(
+    tmp_path: Path, signing_material, identity_field: str
+):
+    private_key, public_key_path = signing_material
+    config_path = _global_config(tmp_path)
+    if identity_field == "profile":
+        config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config_data["profiles"]["entries"]["   "] = {"constrained": True}
+        config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    envelope_path, envelope = _signed_envelope(tmp_path, private_key)
+    envelope[identity_field] = "   "
+    if identity_field == "issuer":
+        key_document = json.loads(public_key_path.read_text(encoding="utf-8"))
+        key_document["issuer"] = "   "
+        public_key_path.write_text(json.dumps(key_document), encoding="utf-8")
+    payload = {key: value for key, value in envelope.items() if key != "signature"}
+    envelope["signature"] = base64.urlsafe_b64encode(
+        private_key.sign(canonical_envelope_bytes(payload))
+    ).decode("ascii").rstrip("=")
+    envelope_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    result = _load(config_path, envelope_path, public_key_path)
+
+    assert result.diagnostic_only is True
+    assert result.profile_source == "invalid-envelope"
+    assert result.mcp_servers == []
+    assert result.diagnostic_codes == ("invalid_launch_envelope",)
+
+
+def test_diagnostic_only_never_scans_or_discloses_skill_roots(
+    tmp_path: Path, signing_material, caplog, capsys
+):
+    _, public_key_path = signing_material
+    private_target = tmp_path / "private" / "secret-skill-target"
+    skills_dir = tmp_path / "private-skills"
+    skills_dir.mkdir()
+    (skills_dir / "broken-secret").symlink_to(private_target)
+    config_path = _global_config(tmp_path)
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_data["registry"]["skills_dirs"] = [str(skills_dir)]
+    config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+    project = tmp_path / "private-project"
+    project_config = project / ".gearcore" / "config.yaml"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text(
+        yaml.safe_dump(
+            {"version": 2, "context": {"name": "secret-private-context"}}
+        ),
+        encoding="utf-8",
+    )
+    config = _load(
+        config_path,
+        tmp_path / "missing-envelope",
+        public_key_path,
+        project=project,
+    )
+
+    with caplog.at_level("DEBUG"):
+        manager = SkillManager(config)
+    cmd_list_skills(config)
+    cmd_status(config)
+    listing = capsys.readouterr().out
+    logs = caplog.text
+
+    assert config.diagnostic_only is True
+    assert config.skills_dirs == []
+    assert manager.skills == {}
+    assert manager.broken_skills == {}
+    assert manager.list_available_skills() == []
+    assert str(skills_dir) not in logs
+    assert str(private_target) not in logs
+    assert str(skills_dir) not in listing
+    assert str(private_target) not in listing
+    assert "broken-secret" not in logs
+    assert "broken-secret" not in listing
+    assert "secret-private-context" not in listing
+
+
+def test_status_reports_effective_and_enforced_profiles_and_server_ids(
+    tmp_path: Path, signing_material, capsys
+):
+    private_key, public_key_path = signing_material
+    config_path = _global_config(tmp_path)
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    for server in config_data["registry"]["mcp_servers"]:
+        if server["id"] == "hive-gateway":
+            server["command"] = "secret-backend-command"
+    config_data["profiles"]["entries"]["observer"]["scope"]["mcp_servers"] = {
+        "include": ["hive-gateway"],
+        "deny": ["hive-dispatcher"],
+    }
+    config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+    envelope_path, _ = _signed_envelope(tmp_path, private_key)
+    config = _load(
+        config_path,
+        envelope_path,
+        public_key_path,
+        profile="observer",
+        project=tmp_path,
+    )
+
+    cmd_status(config)
+    output = capsys.readouterr().out
+
+    assert "Profile: observer" in output
+    assert "Enforced profile: hive-worker" in output
+    assert "Active server IDs: hive-gateway" in output
+    assert "Denied server IDs: hive-dispatcher" in output
+    assert "secret-backend-command" not in output
+    assert "launch-safe" not in output
+    assert "nonce-safe" not in output
 
 
 @pytest.mark.asyncio
