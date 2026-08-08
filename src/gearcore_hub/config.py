@@ -12,10 +12,10 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, NoReturn, Self, SupportsIndex
+from typing import Any, Literal, Self
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 import yaml
@@ -26,7 +26,6 @@ from pydantic import (
     GetCoreSchemaHandler,
     SecretStr,
     ValidationError,
-    field_serializer,
     field_validator,
     model_validator,
 )
@@ -94,11 +93,11 @@ class _SanitizedJsonSchemaValidator:
         self,
         validator: Any,
         error_message: str,
-        assignment_preflight: Callable[[str, object], None] | None = None,
+        assignment_handler: Callable[[Any, str, object], Any] | None = None,
     ) -> None:
         self._validator = validator
         self._error_message = error_message
-        self._assignment_preflight = assignment_preflight
+        self._assignment_preflight = assignment_handler
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._validator, name)
@@ -119,7 +118,7 @@ class _SanitizedJsonSchemaValidator:
         self, instance: object, field_name: str, value: object, *args: Any, **kwargs: Any
     ) -> Any:
         if self._assignment_preflight is not None:
-            self._assignment_preflight(field_name, value)
+            return self._assignment_preflight(instance, field_name, value)
         validation_failed = False
         try:
             validated = self._validator.validate_assignment(
@@ -130,120 +129,6 @@ class _SanitizedJsonSchemaValidator:
         if validation_failed:
             raise McpConfigError(self._error_message)
         return validated
-
-
-def _immutable_container_error() -> NoReturn:
-    raise TypeError("MCP configuration containers are immutable")
-
-
-class _FrozenList(tuple[Any, ...]):
-    """Read-compatible list that cannot mutate model-owned state."""
-
-    def __new__(cls, value: Any = ()) -> Self:
-        return super().__new__(cls, value)
-
-    def __repr__(self) -> str:
-        return repr(list(self))
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, list):
-            return list(self) == other
-        return super().__eq__(other)
-
-    __hash__ = tuple.__hash__
-
-    def __copy__(self) -> Self:
-        return self
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
-        return self
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        _immutable_container_error()
-
-    def __delitem__(self, key: Any) -> None:
-        _immutable_container_error()
-
-    def __iadd__(self, value: Any) -> Self:  # type: ignore[misc]
-        _immutable_container_error()
-
-    def __imul__(self, value: Any) -> Self:  # type: ignore[misc]
-        _immutable_container_error()
-
-    def append(self, value: Any) -> None:
-        _immutable_container_error()
-
-    def extend(self, value: Any) -> None:
-        _immutable_container_error()
-
-    def insert(self, index: SupportsIndex, value: Any) -> None:
-        _immutable_container_error()
-
-    def remove(self, value: Any) -> None:
-        _immutable_container_error()
-
-    def pop(self, index: SupportsIndex = -1) -> Any:
-        _immutable_container_error()
-
-    def clear(self) -> None:
-        _immutable_container_error()
-
-    def sort(self, *args: Any, **kwargs: Any) -> None:
-        _immutable_container_error()
-
-    def reverse(self) -> None:
-        _immutable_container_error()
-
-
-class _FrozenDict(Mapping[Any, Any]):
-    """Read-compatible dict that cannot mutate model-owned state."""
-
-    __slots__ = ("_data",)
-
-    def __init__(self, value: Mapping[Any, Any]) -> None:
-        self._data = dict(value)
-
-    def __getitem__(self, key: Any) -> Any:
-        return self._data[key]
-
-    def __iter__(self) -> Iterator[Any]:
-        return iter(self._data)
-
-    def __len__(self) -> int:
-        return len(self._data)
-
-    def __repr__(self) -> str:
-        return repr(self._data)
-
-    def __copy__(self) -> Self:
-        return self
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
-        return self
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        _immutable_container_error()
-
-    def __delitem__(self, key: Any) -> None:
-        _immutable_container_error()
-
-    def __ior__(self, value: Any) -> Self:
-        _immutable_container_error()
-
-    def clear(self) -> None:
-        _immutable_container_error()
-
-    def pop(self, key: Any, default: Any = None) -> Any:
-        _immutable_container_error()
-
-    def popitem(self) -> tuple[Any, Any]:
-        _immutable_container_error()
-
-    def setdefault(self, key: Any, default: Any = None) -> Any:
-        _immutable_container_error()
-
-    def update(self, *args: Any, **kwargs: Any) -> None:
-        _immutable_container_error()
 
 
 def _is_sensitive_config_name(name: object) -> bool:
@@ -278,7 +163,7 @@ def _contains_plaintext_auth_route(
 ) -> bool:
     """Inspect server mappings without retaining or rendering their values."""
 
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         for key, nested in value.items():
             normalized_key = str(key).casefold().replace("-", "_")
             is_typed_auth_container = server_root and normalized_key == "auth"
@@ -382,7 +267,7 @@ def _url_contains_plaintext_auth(value: object) -> bool:
 def _preflight_auth_input(value: object) -> None:
     if value is None:
         return
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         raise McpConfigError("invalid MCP authentication configuration")
     if set(value).difference(_AUTH_REFERENCE_FIELDS):
         raise McpConfigError("invalid MCP authentication configuration")
@@ -400,6 +285,68 @@ def _preflight_auth_input(value: object) -> None:
         raise McpConfigError("invalid MCP authentication configuration")
 
 
+def _normalize_auth_input(value: object) -> object:
+    return dict(value) if isinstance(value, Mapping) else value
+
+
+def _materialize_nested_mappings(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            key: _materialize_nested_mappings(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_materialize_nested_mappings(nested) for nested in value]
+    if isinstance(value, tuple):
+        return tuple(_materialize_nested_mappings(nested) for nested in value)
+    return value
+
+
+def _normalize_server_input(value: object) -> object:
+    """Materialize supported repeatable carriers once before inspection."""
+
+    if not isinstance(value, Mapping):
+        return value
+    normalized_value = _materialize_nested_mappings(value)
+    if not isinstance(normalized_value, dict):
+        raise McpConfigError("invalid MCP server configuration")
+    normalized = normalized_value
+    environment = normalized.get("env")
+    if environment is not None:
+        if not isinstance(environment, Mapping):
+            raise McpConfigError("invalid MCP server configuration")
+        normalized["env"] = dict(environment)
+    auth = normalized.get("auth")
+    if isinstance(auth, Mapping):
+        normalized["auth"] = dict(auth)
+    return normalized
+
+
+def _model_validation_payload(model: BaseModel) -> dict[str, Any]:
+    """Return exactly the explicitly set model state for revalidation."""
+
+    state = object.__getattribute__(model, "__dict__")
+    payload = {
+        field_name: state[field_name]
+        for field_name in model.__pydantic_fields_set__
+        if field_name in state
+    }
+    extras = model.__pydantic_extra__
+    if extras:
+        payload.update(extras)
+    return payload
+
+
+def _commit_validated_model(target: BaseModel, candidate: BaseModel) -> None:
+    """Atomically replace model state only after full candidate validation."""
+
+    object.__setattr__(target, "__dict__", candidate.__dict__.copy())
+    object.__setattr__(
+        target, "__pydantic_fields_set__", candidate.__pydantic_fields_set__.copy()
+    )
+    object.__setattr__(target, "__pydantic_extra__", candidate.__pydantic_extra__)
+
+
 class _SanitizedConfigModel(BaseModel):
     """Core-schema boundary that replaces input-retaining errors."""
 
@@ -412,8 +359,29 @@ class _SanitizedConfigModel(BaseModel):
         return "invalid configuration document"
 
     @classmethod
-    def _preflight_assignment(cls, field_name: str, value: object) -> None:
-        return
+    def _normalize_input(cls, value: object) -> object:
+        return value
+
+    @classmethod
+    def _preflight_assignment(cls, field_name: str, value: object) -> None: ...
+
+    @classmethod
+    def _normalize_assignment_value(
+        cls, field_name: str, value: object
+    ) -> object:
+        return value
+
+    @classmethod
+    def _validated_assignment(
+        cls, instance: Self, field_name: str, value: object
+    ) -> Self:
+        normalized_value = cls._normalize_assignment_value(field_name, value)
+        cls._preflight_assignment(field_name, normalized_value)
+        payload = _model_validation_payload(instance)
+        payload[field_name] = normalized_value
+        candidate = cls.model_validate(payload)
+        _commit_validated_model(instance, candidate)
+        return instance
 
     @classmethod
     def _install_json_validation_boundary(cls) -> None:
@@ -422,7 +390,7 @@ class _SanitizedConfigModel(BaseModel):
             cls.__pydantic_validator__ = _SanitizedJsonSchemaValidator(  # type: ignore[assignment]
                 validator,
                 cls._validation_error_message(None),
-                cls._preflight_assignment,
+                cls._validated_assignment,
             )
 
     @classmethod
@@ -436,17 +404,28 @@ class _SanitizedConfigModel(BaseModel):
         return rebuilt
 
     def __setattr__(self, field_name: str, value: Any) -> None:
-        model_type = type(self)
-        model_type._preflight_assignment(field_name, value)
-        validation_failed = False
-        try:
-            super().__setattr__(field_name, value)
-        except ValidationError:
-            validation_failed = True
-        if validation_failed:
-            raise McpConfigError(
-                model_type._validation_error_message({field_name: value})
+        type(self)._validated_assignment(self, field_name, value)
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        if update is None:
+            return super().model_copy(deep=deep)
+        source = super().model_copy(deep=deep)
+        payload = _model_validation_payload(source)
+        payload.update(dict(update))
+        return type(self).model_validate(payload)
+
+    @classmethod
+    def model_construct(
+        cls, _fields_set: set[str] | None = None, **values: Any
+    ) -> Self:
+        validated = cls.model_validate(values)
+        if _fields_set is not None:
+            object.__setattr__(
+                validated, "__pydantic_fields_set__", set(_fields_set)
             )
+        return validated
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -463,10 +442,11 @@ class _SanitizedConfigModel(BaseModel):
     ) -> object:
         if isinstance(value, cls):
             return handler(value)
-        cls._preflight_input(value)
+        normalized = cls._normalize_input(value)
+        cls._preflight_input(normalized)
         validation_failed = False
         try:
-            validated = handler(value)
+            validated = handler(normalized)
         except ValidationError:
             validation_failed = True
         if validation_failed:
@@ -488,6 +468,10 @@ class McpAuthConfig(_SanitizedConfigModel):
     @classmethod
     def _preflight_input(cls, value: object) -> None:
         _preflight_auth_input(value)
+
+    @classmethod
+    def _normalize_input(cls, value: object) -> object:
+        return _normalize_auth_input(value)
 
     @classmethod
     def _validation_error_message(cls, value: object) -> str:
@@ -522,7 +506,10 @@ class McpAuthConfig(_SanitizedConfigModel):
 
 
 def _preflight_server_input(value: object) -> None:
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
+        raise McpConfigError("invalid MCP server configuration")
+    args = value.get("args")
+    if args is not None and not isinstance(args, (list, tuple)):
         raise McpConfigError("invalid MCP server configuration")
     if (
         _contains_plaintext_auth_route(value, server_root=True)
@@ -550,9 +537,21 @@ class McpServerConfig(_SanitizedConfigModel):
     auth: McpAuthConfig | None = None
     enabled: bool = True
 
+    def __getattribute__(self, field_name: str) -> Any:
+        value = super().__getattribute__(field_name)
+        if field_name == "args" and isinstance(value, list):
+            return value.copy()
+        if field_name == "env" and isinstance(value, dict):
+            return value.copy()
+        return value
+
     @classmethod
     def _preflight_input(cls, value: object) -> None:
         _preflight_server_input(value)
+
+    @classmethod
+    def _normalize_input(cls, value: object) -> object:
+        return _normalize_server_input(value)
 
     @classmethod
     def _validation_error_message(cls, value: object) -> str:
@@ -564,27 +563,26 @@ class McpServerConfig(_SanitizedConfigModel):
     def _preflight_assignment(cls, field_name: str, value: object) -> None:
         _preflight_server_input({field_name: value})
 
+    @classmethod
+    def _normalize_assignment_value(
+        cls, field_name: str, value: object
+    ) -> object:
+        normalized = _normalize_server_input({field_name: value})
+        if isinstance(normalized, Mapping):
+            return normalized[field_name]
+        return value
+
     @field_validator("args", mode="after")
     @classmethod
-    def freeze_args(cls, value: list[str]) -> list[str]:
-        return _FrozenList(value)  # type: ignore[return-value]
+    def copy_args(cls, value: list[str]) -> list[str]:
+        return value.copy()
 
     @field_validator("env", mode="after")
     @classmethod
-    def freeze_environment(
+    def copy_environment(
         cls, value: dict[str, str] | None
     ) -> dict[str, str] | None:
-        return None if value is None else _FrozenDict(value)  # type: ignore[return-value]
-
-    @field_serializer("args")
-    def serialize_args(self, value: list[str]) -> list[str]:
-        return list(value)
-
-    @field_serializer("env")
-    def serialize_environment(
-        self, value: dict[str, str] | None
-    ) -> dict[str, str] | None:
-        return None if value is None else dict(value)
+        return None if value is None else value.copy()
 
     @model_validator(mode="before")
     @classmethod
@@ -612,12 +610,17 @@ class McpServerConfig(_SanitizedConfigModel):
         return self
 
 
-def _sanitize_registry_servers(data: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_registry_servers(data: Mapping[str, Any]) -> dict[str, Any]:
     """Validate server entries before outer Pydantic models can retain input."""
 
+    sanitized_data = dict(data)
     registry = data.get("registry")
-    if not isinstance(registry, dict) or "mcp_servers" not in registry:
-        return data
+    if not isinstance(registry, Mapping):
+        return sanitized_data
+    sanitized_registry = dict(registry)
+    sanitized_data["registry"] = sanitized_registry
+    if "mcp_servers" not in registry:
+        return sanitized_data
     raw_servers = registry["mcp_servers"]
     if not isinstance(raw_servers, list):
         raise McpConfigError("invalid MCP server configuration")
@@ -626,16 +629,23 @@ def _sanitize_registry_servers(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(raw_server, McpServerConfig):
             server = raw_server
             sanitized_server = server.model_dump()
-        elif isinstance(raw_server, dict):
-            server = McpServerConfig(**raw_server)
+        elif isinstance(raw_server, Mapping):
+            materialized_server = _normalize_server_input(raw_server)
+            if not isinstance(materialized_server, dict):
+                raise McpConfigError("invalid MCP server configuration")
+            server = McpServerConfig(**materialized_server)
             # Preserve permissive version-2 extension keys while replacing
             # the only sensitive reference with its redacting wrapper.
-            sanitized_server = dict(raw_server)
+            sanitized_server = materialized_server
+            validated_server = server.model_dump()
+            for field_name in McpServerConfig.model_fields:
+                if field_name in sanitized_server:
+                    sanitized_server[field_name] = validated_server[field_name]
             if server.auth is not None:
-                raw_auth = raw_server["auth"]
+                raw_auth = materialized_server["auth"]
                 sanitized_auth = (
                     dict(raw_auth)
-                    if isinstance(raw_auth, dict)
+                    if isinstance(raw_auth, Mapping)
                     else server.auth.model_dump()
                 )
                 sanitized_auth["credential_ref"] = server.auth.credential_ref
@@ -643,10 +653,7 @@ def _sanitize_registry_servers(data: dict[str, Any]) -> dict[str, Any]:
         else:
             raise McpConfigError("invalid MCP server configuration")
         servers.append(sanitized_server)
-    sanitized_registry = dict(registry)
     sanitized_registry["mcp_servers"] = servers
-    sanitized_data = dict(data)
-    sanitized_data["registry"] = sanitized_registry
     return sanitized_data
 
 
@@ -671,6 +678,27 @@ class _SanitizedRegistryConfigModel(BaseModel):
         cls._install_json_validation_boundary()
         return rebuilt
 
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        if update is None:
+            return super().model_copy(deep=deep)
+        source = super().model_copy(deep=deep)
+        payload = _model_validation_payload(source)
+        payload.update(dict(update))
+        return type(self).model_validate(payload)
+
+    @classmethod
+    def model_construct(
+        cls, _fields_set: set[str] | None = None, **values: Any
+    ) -> Self:
+        validated = cls.model_validate(values)
+        if _fields_set is not None:
+            object.__setattr__(
+                validated, "__pydantic_fields_set__", set(_fields_set)
+            )
+        return validated
+
     @classmethod
     def __get_pydantic_core_schema__(
         cls, source_type: Any, handler: GetCoreSchemaHandler
@@ -686,7 +714,9 @@ class _SanitizedRegistryConfigModel(BaseModel):
     ) -> object:
         if isinstance(value, cls):
             return handler(value)
-        sanitized = _sanitize_registry_servers(value) if isinstance(value, dict) else value
+        sanitized = (
+            _sanitize_registry_servers(value) if isinstance(value, Mapping) else value
+        )
         validation_failed = False
         try:
             validated = handler(sanitized)

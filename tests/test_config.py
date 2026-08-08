@@ -1,7 +1,10 @@
 """Tests for the layered configuration loader."""
 
 import json
+import warnings
+from collections import UserDict, deque
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 from pydantic import TypeAdapter
@@ -422,34 +425,197 @@ class TestMcpAuthConfig:
 
     def test_server_benign_assignment_remains_supported(self):
         server = McpServerConfig(id="legacy")
+        before_extra = server.model_extra
 
         server.enabled = False
 
         assert server.enabled is False
+        assert server.model_fields_set == {"id", "enabled"}
+        assert server.model_extra == before_extra
 
     def test_server_containers_cannot_be_mutated_in_place(self):
+        input_args = ["--mode", "safe"]
+        input_env = {"MODE": "safe"}
         server = McpServerConfig(
             id="legacy",
-            args=["--mode", "safe"],
-            env={"MODE": "safe"},
+            args=input_args,
+            env=input_env,
         )
 
-        with pytest.raises(TypeError) as args_exc:
-            server.args.append(SENTINEL)
+        input_args.append(SENTINEL)
+        input_env["API_TOKEN"] = SENTINEL
+        args_copy = server.args
+        args_copy.append(SENTINEL)
         assert server.env is not None
-        with pytest.raises(TypeError) as env_exc:
-            server.env["API_TOKEN"] = SENTINEL
-        with pytest.raises(TypeError) as base_args_exc:
-            list.append(server.args, SENTINEL)
-        with pytest.raises(TypeError) as base_env_exc:
-            dict.__setitem__(server.env, "API_TOKEN", SENTINEL)
+        env_copy = server.env
+        env_copy["API_TOKEN"] = SENTINEL
 
-        for exc_info in (args_exc, env_exc, base_args_exc, base_env_exc):
-            _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+        assert isinstance(server.args, list)
+        assert isinstance(server.env, dict)
+        assert server.args.copy() == ["--mode", "safe"]
+        assert server.env.copy() == {"MODE": "safe"}
+        assert SENTINEL not in server.args
+        assert "API_TOKEN" not in server.env
         dumped = server.model_dump()
         assert isinstance(dumped["args"], list)
         assert isinstance(dumped["env"], dict)
         assert SENTINEL not in repr(server)
+
+    @pytest.mark.parametrize("route", ["direct", "assignment", "global", "project"])
+    @pytest.mark.parametrize(
+        ("field_name", "value_factory"),
+        [
+            ("env", lambda: MappingProxyType({"API_TOKEN": SENTINEL})),
+            ("env", lambda: UserDict({"API_TOKEN": SENTINEL})),
+            (
+                "metadata",
+                lambda: MappingProxyType(
+                    {"auth": UserDict({"token": SENTINEL})}
+                ),
+            ),
+            ("args", lambda: deque(["--token", SENTINEL])),
+            ("args", lambda: iter(["--token", SENTINEL])),
+            ("args", lambda: {"--token", SENTINEL}),
+        ],
+    )
+    def test_nonconcrete_plaintext_carriers_fail_closed(
+        self, field_name: str, value_factory, route: str
+    ):
+        payload = {"id": "legacy", field_name: value_factory()}
+
+        with pytest.raises(McpConfigError) as exc_info:
+            if route == "direct":
+                McpServerConfig(**payload)
+            elif route == "assignment":
+                server = McpServerConfig(id="legacy")
+                setattr(server, field_name, payload[field_name])
+            else:
+                config_type = GlobalConfig if route == "global" else ProjectConfig
+                config_type(registry={"mcp_servers": [payload]})
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
+    @pytest.mark.parametrize(
+        "environment",
+        [
+            MappingProxyType({"MODE": "safe"}),
+            UserDict({"MODE": "safe"}),
+        ],
+    )
+    def test_safe_mapping_environments_are_materialized_once(self, environment):
+        server = McpServerConfig(id="legacy", env=environment)
+
+        assert isinstance(server.env, dict)
+        assert server.env == {"MODE": "safe"}
+
+        server.env = environment
+        assert server.env == {"MODE": "safe"}
+
+        outer = GlobalConfig(
+            registry={"mcp_servers": [{"id": "legacy", "env": environment}]}
+        )
+        assert outer.mcp_servers[0].env == {"MODE": "safe"}
+        assert "MODE" in outer.model_dump_json()
+
+    def test_tuple_arguments_keep_the_public_list_contract(self):
+        server = McpServerConfig(id="legacy", args=("--mode", "safe"))
+
+        assert isinstance(server.args, list)
+        assert server.args == ["--mode", "safe"]
+
+    @pytest.mark.parametrize(
+        ("model_type", "instance", "unsafe_update"),
+        [
+            (
+                McpAuthConfig,
+                McpAuthConfig(credential_ref="operator"),
+                {"unexpected": SENTINEL},
+            ),
+            (
+                McpServerConfig,
+                McpServerConfig(id="legacy"),
+                {"API_TOKEN": SENTINEL},
+            ),
+            (GlobalConfig, GlobalConfig(), {"registry": SENTINEL}),
+            (ProjectConfig, ProjectConfig(), {"scope": SENTINEL}),
+        ],
+    )
+    @pytest.mark.parametrize("escape", ["model_copy", "model_construct"])
+    def test_pydantic_unvalidated_escape_hatches_are_closed(
+        self, model_type, instance, unsafe_update: dict[str, object], escape: str
+    ):
+        before_dump = instance.model_dump()
+        before_repr = repr(instance)
+        with (
+            warnings.catch_warnings(record=True) as caught,
+            pytest.raises(McpConfigError) as exc_info,
+        ):
+            if escape == "model_copy":
+                instance.model_copy(update=unsafe_update)
+            else:
+                model_type.model_construct(**unsafe_update)
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+        assert SENTINEL not in repr(caught)
+        assert instance.model_dump() == before_dump
+        assert repr(instance) == before_repr
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            McpAuthConfig(credential_ref="operator"),
+            McpServerConfig(id="legacy", args=["--mode", "safe"]),
+            GlobalConfig(),
+            ProjectConfig(),
+        ],
+    )
+    def test_valid_model_copy_and_construct_remain_supported(self, model):
+        with warnings.catch_warnings(record=True) as caught:
+            shallow = model.model_copy()
+            deep = model.model_copy(deep=True)
+            rebuilt = type(model).model_construct(**model.model_dump())
+
+        assert shallow == model
+        assert deep == model
+        assert rebuilt == model
+        assert not caught
+
+    @pytest.mark.parametrize("api", ["direct", "validator"])
+    @pytest.mark.parametrize("change", ["transport", "bearer_auth"])
+    def test_cross_field_assignment_is_transactional(self, api: str, change: str):
+        server = McpServerConfig(
+            id="dispatcher",
+            type="stdio",
+            auth={
+                "credential_ref": "operator",
+                "stdio_environment": "HIVE_AUTH",
+            },
+        )
+        field_name = "type" if change == "transport" else "auth"
+        value: object = "sse"
+        if change == "bearer_auth":
+            value = McpAuthConfig(
+                credential_ref=SENTINEL,
+                http_scheme="bearer",
+            )
+        before_dump = server.model_dump()
+        before_repr = repr(server)
+        before_fields_set = server.model_fields_set.copy()
+        before_extra = server.model_extra
+
+        with pytest.raises(McpConfigError) as exc_info:
+            if api == "direct":
+                setattr(server, field_name, value)
+            else:
+                server.__pydantic_validator__.validate_assignment(
+                    server, field_name, value
+                )
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+        assert server.model_dump() == before_dump
+        assert repr(server) == before_repr
+        assert server.model_fields_set == before_fields_set
+        assert server.model_extra == before_extra
 
     @pytest.mark.parametrize("method", ["model_validate", "model_validate_json"])
     def test_alternate_auth_validation_does_not_retain_unknown_input(
