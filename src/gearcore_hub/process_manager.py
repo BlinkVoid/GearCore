@@ -12,7 +12,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
-from gearcore_hub.config import McpServerConfig
+from gearcore_hub.config import EffectiveConfig, McpServerConfig
 from gearcore_hub.credentials import CredentialStore
 
 logger = logging.getLogger("gearcore.process_manager")
@@ -396,7 +396,15 @@ class SharedMCPServer:
 class ProcessManager:
     """Registry and single construction path for shared MCP backends."""
 
-    def __init__(self, credential_store: CredentialStore | None = None) -> None:
+    def __init__(
+        self,
+        config: EffectiveConfig,
+        credential_store: CredentialStore | None = None,
+    ) -> None:
+        # Force the defensive effective-sequence validation now, before any
+        # lifecycle state or backend can be constructed.
+        _ = config.mcp_servers
+        self.config = config
         self.credential_store = (
             credential_store if credential_store is not None else CredentialStore()
         )
@@ -408,16 +416,24 @@ class ProcessManager:
         self._pending_cleanup: dict[str, SharedMCPServer] = {}
         self._shutting_down = False
 
-    def build_server(self, server_config: McpServerConfig) -> SharedMCPServer:
-        """Build one backend from an immutable configuration snapshot."""
+    def _server_config(self, server_id: str) -> McpServerConfig:
+        server = self.config.mcp_server(server_id)
+        if server is not None:
+            return server
+        # This is a policy boundary, not a registry discovery surface. Do not
+        # reveal a denied raw definition or any of its transport data.
+        raise KeyError("capability_denied") from None
+
+    def build_server(self, server_id: str) -> SharedMCPServer:
+        """Build one backend selected from the bound effective configuration."""
 
         return SharedMCPServer(
-            server_config,
+            self._server_config(server_id),
             credential_store=self.credential_store,
         )
 
-    async def register_and_start(self, server_config: McpServerConfig) -> None:
-        server_id = server_config.id
+    async def register_and_start(self, server_id: str) -> None:
+        server_config = self._server_config(server_id)
         reservation: asyncio.Future[bool]
         while True:
             async with self._state_lock:
@@ -463,7 +479,7 @@ class ProcessManager:
         server: SharedMCPServer | None = None
         propagated: BaseException | None = None
         try:
-            server = self.build_server(server_config)
+            server = self.build_server(server_id)
             await server.start()
         except BaseException as caught:
             if server_config.auth is not None:

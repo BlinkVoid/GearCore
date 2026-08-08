@@ -95,6 +95,210 @@ class TestGlobalConfig:
         assert effective.mcp_servers[0].id == "fs"
 
 
+@pytest.mark.parametrize("model_type", [GlobalConfig, ProjectConfig])
+@pytest.mark.parametrize("carrier", ["raw", "typed"])
+def test_registry_rejects_duplicate_server_ids_without_retaining_definitions(
+    model_type, carrier: str, caplog
+):
+    command_sentinel = "secret-duplicate-command-sentinel"
+    path_sentinel = "/secret/duplicate/path/sentinel"
+    credential_sentinel = "secret-duplicate-credential-sentinel"
+    first: dict[str, Any] | McpServerConfig = {
+        "id": "duplicate-id",
+        "type": "stdio",
+        "command": command_sentinel,
+        "args": [path_sentinel],
+        "auth": {
+            "credential_ref": credential_sentinel,
+            "stdio_environment": "DUPLICATE_AUTH",
+        },
+    }
+    second: dict[str, Any] | McpServerConfig = {
+        "id": "duplicate-id",
+        "type": "http",
+        "url": "https://secret-duplicate-url.invalid/mcp",
+        "auth": {
+            "credential_ref": "opposing-duplicate-credential",
+            "http_scheme": "bearer",
+        },
+    }
+    if carrier == "typed":
+        first = McpServerConfig.model_validate(first)
+        second = McpServerConfig.model_validate(second)
+
+    with pytest.raises(
+        McpConfigError, match="invalid MCP server configuration"
+    ) as exc_info:
+        model_type.model_validate(
+            {"version": 2, "registry": {"mcp_servers": [first, second]}}
+        )
+
+    rendered = f"{exc_info.value!s}\n{exc_info.value!r}\n{caplog.text}"
+    for sentinel in (
+        command_sentinel,
+        path_sentinel,
+        credential_sentinel,
+        "secret-duplicate-url",
+        "opposing-duplicate-credential",
+        "duplicate-id",
+    ):
+        assert sentinel not in rendered
+        _assert_exception_does_not_retain(exc_info.value, sentinel)
+
+
+@pytest.mark.parametrize(
+    "unsafe_id",
+    [
+        "",
+        "   ",
+        "line\nfeed",
+        "carriage\rreturn",
+        "tab\tseparated",
+        "escape\x1bsequence",
+        "nul\x00byte",
+        "format\u200bcharacter",
+        "line\u2028separator",
+        "paragraph\u2029separator",
+        "x" * 256,
+    ],
+)
+def test_server_id_rejects_blank_control_format_and_oversized_values(
+    unsafe_id: str, caplog
+):
+    with pytest.raises(McpConfigError) as exc_info:
+        McpServerConfig(id=unsafe_id)
+
+    rendered = f"{exc_info.value!s}\n{exc_info.value!r}\n{caplog.text}"
+    if unsafe_id:
+        assert unsafe_id not in rendered
+    assert "invalid MCP server configuration" in rendered
+
+
+@pytest.mark.parametrize(
+    "server_id",
+    [
+        "visible space",
+        " leading-and-trailing ",
+        "日本語: worker, αβ",
+        "x" * 255,
+    ],
+)
+def test_server_id_preserves_visible_v2_identifiers(server_id: str):
+    assert McpServerConfig(id=server_id).id == server_id
+
+
+def test_server_id_assignment_is_atomic_and_sanitized(caplog):
+    server = McpServerConfig(id="safe visible id")
+    unsafe_id = "unsafe\nINJECTED_ASSIGNMENT"
+
+    with pytest.raises(McpConfigError) as exc_info:
+        server.id = unsafe_id
+
+    rendered = f"{exc_info.value!s}\n{exc_info.value!r}\n{caplog.text}"
+    assert unsafe_id not in rendered
+    assert "INJECTED_ASSIGNMENT" not in rendered
+    assert server.id == "safe visible id"
+
+
+@pytest.mark.parametrize("model_type", [GlobalConfig, ProjectConfig])
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+def test_outer_config_rejects_unicode_line_separator_server_ids_safely(
+    model_type, separator: str, caplog
+):
+    unsafe_id = f"unsafe{separator}INJECTED_OUTER_LINE"
+
+    with pytest.raises(McpConfigError) as exc_info:
+        model_type.model_validate(
+            {
+                "version": 2,
+                "registry": {
+                    "mcp_servers": [{"id": unsafe_id, "command": "safe"}]
+                },
+            }
+        )
+
+    rendered = f"{exc_info.value!s}\n{exc_info.value!r}\n{caplog.text}"
+    assert unsafe_id not in rendered
+    assert "INJECTED_OUTER_LINE" not in rendered
+    assert "invalid MCP server configuration" in rendered
+
+
+@pytest.mark.parametrize("model_type", [GlobalConfig, ProjectConfig])
+@pytest.mark.parametrize("carrier", ["raw", "typed"])
+def test_duplicate_registry_assignment_is_atomic_and_sanitized(
+    model_type, carrier: str, caplog
+):
+    config = model_type.model_validate(
+        {
+            "version": 2,
+            "registry": {
+                "mcp_servers": [{"id": "original", "command": "original"}]
+            },
+        }
+    )
+    before = config.model_dump(round_trip=True)
+    command_sentinel = "secret-assignment-command-sentinel"
+    path_sentinel = "/secret/assignment/path/sentinel"
+    first: dict[str, Any] | McpServerConfig = {
+        "id": "duplicate-assignment",
+        "type": "stdio",
+        "command": command_sentinel,
+        "args": [path_sentinel],
+    }
+    second: dict[str, Any] | McpServerConfig = {
+        "id": "duplicate-assignment",
+        "type": "http",
+        "url": "https://secret-assignment-url.invalid/mcp",
+    }
+    if carrier == "typed":
+        first = McpServerConfig.model_validate(first)
+        second = McpServerConfig.model_validate(second)
+
+    with pytest.raises(McpConfigError) as exc_info:
+        config.registry = {"mcp_servers": [first, second]}
+
+    rendered = f"{exc_info.value!s}\n{exc_info.value!r}\n{caplog.text}"
+    for sentinel in (
+        "duplicate-assignment",
+        command_sentinel,
+        path_sentinel,
+        "secret-assignment-url",
+    ):
+        assert sentinel not in rendered
+        _assert_exception_does_not_retain(exc_info.value, sentinel)
+    assert config.model_dump(round_trip=True) == before
+    assert [server.id for server in config.mcp_servers] == ["original"]
+
+
+def test_effective_and_process_boundaries_reject_corrupted_duplicate_ids():
+    from gearcore_hub.process_manager import ProcessManager
+
+    effective = EffectiveConfig(
+        GlobalConfig(
+            registry={
+                "mcp_servers": [
+                    {"id": "first", "command": "first"},
+                    {"id": "second", "command": "second"},
+                ]
+            }
+        ),
+        None,
+        None,
+    )
+    duplicate = (
+        McpServerConfig(id="duplicate", type="stdio", command="first"),
+        McpServerConfig(
+            id="duplicate", type="http", url="https://opposing.invalid/mcp"
+        ),
+    )
+    object.__setattr__(effective, "_mcp_servers", duplicate)
+
+    with pytest.raises(McpConfigError, match="invalid MCP server configuration"):
+        effective.mcp_server("duplicate")
+    with pytest.raises(McpConfigError, match="invalid MCP server configuration"):
+        ProcessManager(effective)
+
+
 class TestMcpAuthConfig:
     def test_stdio_credential_reference_is_valid(self):
         server = McpServerConfig(

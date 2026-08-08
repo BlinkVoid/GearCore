@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from collections.abc import Callable, Generator, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -903,6 +904,20 @@ class McpServerConfig(_SanitizedConfigModel):
     auth: McpAuthConfig | None = None
     enabled: bool = True
 
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        if (
+            not value.strip()
+            or len(value) > 255
+            or any(
+                unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+                for character in value
+            )
+        ):
+            raise ValueError("invalid MCP server id")
+        return value
+
     def __getattribute__(self, field_name: str) -> Any:
         value = super().__getattribute__(field_name)
         if field_name == "args":
@@ -1026,6 +1041,8 @@ def _sanitize_registry_servers(data: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_servers, (list, tuple)):
         raise McpConfigError("invalid MCP server configuration")
     servers: list[dict[str, Any]] = []
+    server_ids: set[str] = set()
+    duplicate_id = False
     for raw_server in raw_servers:
         if isinstance(raw_server, McpServerConfig):
             server = raw_server._validated_state()
@@ -1053,7 +1070,12 @@ def _sanitize_registry_servers(data: Mapping[str, Any]) -> dict[str, Any]:
                 sanitized_server["auth"] = sanitized_auth
         else:
             raise McpConfigError("invalid MCP server configuration")
+        if server.id in server_ids:
+            duplicate_id = True
+        server_ids.add(server.id)
         servers.append(sanitized_server)
+    if duplicate_id:
+        raise McpConfigError("invalid MCP server configuration")
     sanitized_registry["mcp_servers"] = servers
     return sanitized_data
 
@@ -1513,11 +1535,17 @@ class EffectiveConfig:
     def _resolve_mcp_servers(
         self,
     ) -> tuple[tuple[McpServerConfig, ...], ResolvedCapabilities]:
-        global_servers = [s for s in self.global_cfg.mcp_servers if s.enabled]
-        project_servers = (
-            []
-            if self.project_cfg is None
-            else [s for s in self.project_cfg.mcp_servers if s.enabled]
+        global_servers = list(
+            self._require_unique_mcp_servers(
+                tuple(s for s in self.global_cfg.mcp_servers if s.enabled)
+            )
+        )
+        project_servers = list(
+            self._require_unique_mcp_servers(
+                ()
+                if self.project_cfg is None
+                else tuple(s for s in self.project_cfg.mcp_servers if s.enabled)
+            )
         )
         project_include, project_deny = self._project_capability_rules(
             "mcp_servers"
@@ -1567,15 +1595,50 @@ class EffectiveConfig:
             for server in project_servers
             if server.id in active and server.id not in protected
         )
-        return tuple(servers), resolved
+        return self._require_unique_mcp_servers(tuple(servers)), resolved
+
+    @staticmethod
+    def _require_unique_mcp_servers(
+        servers: tuple[McpServerConfig, ...],
+    ) -> tuple[McpServerConfig, ...]:
+        """Validate a server sequence without selecting a first/last winner."""
+
+        validated: list[McpServerConfig] = []
+        ids: set[str] = set()
+        duplicate_id = False
+        for server in servers:
+            if not isinstance(server, McpServerConfig):
+                raise McpConfigError("invalid MCP server configuration")
+            candidate = server._validated_state()
+            if candidate.id in ids:
+                duplicate_id = True
+            ids.add(candidate.id)
+            validated.append(candidate)
+        if duplicate_id:
+            raise McpConfigError("invalid MCP server configuration")
+        return tuple(validated)
+
+    def mcp_server(self, server_id: str) -> McpServerConfig | None:
+        """Return one unambiguous effective server definition by ID."""
+
+        for server in self._require_unique_mcp_servers(self._mcp_servers):
+            if server.id == server_id:
+                return server.model_copy(deep=True)
+        return None
 
     @property
     def mcp_servers(self) -> list[McpServerConfig]:
-        return [server.model_copy(deep=True) for server in self._mcp_servers]
+        return [
+            server.model_copy(deep=True)
+            for server in self._require_unique_mcp_servers(self._mcp_servers)
+        ]
 
     @property
     def active_mcp_server_ids(self) -> tuple[str, ...]:
-        return tuple(server.id for server in self._mcp_servers)
+        return tuple(
+            server.id
+            for server in self._require_unique_mcp_servers(self._mcp_servers)
+        )
 
     @property
     def denied_mcp_server_ids(self) -> tuple[str, ...]:

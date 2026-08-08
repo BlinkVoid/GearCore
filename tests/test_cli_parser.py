@@ -81,6 +81,56 @@ def test_profile_set_parser_accepts_repeatable_capability_options():
     assert args.make_default is True
 
 
+@pytest.mark.parametrize(
+    "unsafe_id",
+    [
+        "missing\nINJECTED_LOG_LINE",
+        "missing\rINJECTED_STATUS_LINE",
+        "missing\tINJECTED_FIELD",
+        "missing\x1b[31mINJECTED_COLOR",
+        "missing\x00INJECTED_NUL",
+        "missing\u200bINJECTED_FORMAT",
+        "missing\u2028INJECTED_LINE_SEPARATOR",
+        "missing\u2029INJECTED_PARAGRAPH_SEPARATOR",
+    ],
+)
+def test_call_rejects_control_character_id_without_cli_or_log_injection(
+    tmp_path, monkeypatch, capsys, caplog, unsafe_id
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "version: 2\n"
+        "registry:\n"
+        "  mcp_servers:\n"
+        "    - id: safe\n"
+        "      type: stdio\n"
+        "      command: safe-command\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gearcore",
+            "--config",
+            str(config_path),
+            "call",
+            unsafe_id,
+            "health",
+            "{}",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_main()
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err + caplog.text
+    assert exc_info.value.code == 1
+    assert rendered.strip() == "error: capability_denied"
+    assert "INJECTED" not in rendered
+
+
 def test_profile_set_cli_is_global_only_and_does_not_print_config_path(
     tmp_path, monkeypatch, capsys
 ):
@@ -476,8 +526,11 @@ def test_status_does_not_swallow_base_control_flow(tmp_path, control_flow):
         assert raised.value.code == 7
 
 
-def test_status_escapes_hostile_legacy_ids_and_scalars(tmp_path, capsys):
+def test_status_escapes_hostile_legacy_scalars_and_visible_server_ids(
+    tmp_path, capsys
+):
     hostile = "evil\nsource: forged,delimiter\x1b[31m"
+    visible_server_id = "evil source: forged,delimiter"
     skills = tmp_path / "skills"
     bundle = skills / "bundle"
     bundle.mkdir(parents=True)
@@ -494,7 +547,11 @@ def test_status_escapes_hostile_legacy_ids_and_scalars(tmp_path, capsys):
                 "registry": {
                     "skills_dirs": [str(skills)],
                     "mcp_servers": [
-                        {"id": hostile, "type": "stdio", "command": "safe"}
+                        {
+                            "id": visible_server_id,
+                            "type": "stdio",
+                            "command": "safe",
+                        }
                     ],
                 },
                 "profiles": {
@@ -502,7 +559,7 @@ def test_status_escapes_hostile_legacy_ids_and_scalars(tmp_path, capsys):
                     "entries": {
                         hostile: {
                             "scope": {
-                                "mcp_servers": {"include": [hostile]},
+                                "mcp_servers": {"include": [visible_server_id]},
                                 "skills": {"include": [hostile]},
                             }
                         }

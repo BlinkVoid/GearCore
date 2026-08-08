@@ -13,7 +13,12 @@ import pytest
 from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest, Tool
 from pydantic import SecretStr
 
-from gearcore_hub.config import McpServerConfig, load_config
+from gearcore_hub.config import (
+    EffectiveConfig,
+    GlobalConfig,
+    McpServerConfig,
+    load_config,
+)
 from gearcore_hub.credentials import CredentialError
 from gearcore_hub.main import GearCoreHub, cmd_call, cmd_status
 from gearcore_hub.process_manager import ProcessManager, SharedMCPServer
@@ -121,6 +126,15 @@ def authenticated_config(transport: str = "stdio") -> McpServerConfig:
         values["url"] = "https://dispatcher.invalid/mcp"
         auth["http_scheme"] = "bearer"
     return McpServerConfig(**values)
+
+
+def effective_for_servers(*servers: McpServerConfig) -> EffectiveConfig:
+    """Build the real effective boundary used by ProcessManager unit tests."""
+
+    global_config = GlobalConfig.model_validate(
+        {"version": 2, "registry": {"mcp_servers": list(servers)}}
+    )
+    return EffectiveConfig(global_config, None, None)
 
 
 def authenticated_effective_config(tmp_path: Any) -> Any:
@@ -428,9 +442,12 @@ async def test_secret_not_retained_by_manager_server_or_configuration(
     monkeypatch.setattr("gearcore_hub.process_manager.sse_client", factory)
     monkeypatch.setattr("gearcore_hub.process_manager.ClientSession", SessionContext)
     config = authenticated_config("sse")
-    manager = ProcessManager(credential_store=RecordingCredentialStore())
+    manager = ProcessManager(
+        effective_for_servers(config),
+        credential_store=RecordingCredentialStore(),
+    )
 
-    await manager.register_and_start(config)
+    await manager.register_and_start("dispatcher")
     server = manager.servers["dispatcher"]
 
     assert captured_headers == {"Authorization": f"Bearer {SECRET}"}
@@ -478,9 +495,9 @@ async def test_stop_then_restart_reresolves_secret_and_closes_each_context(
 def test_process_manager_build_server_is_single_configuration_factory() -> None:
     config = authenticated_config("stdio")
     store = RecordingCredentialStore()
-    manager = ProcessManager(credential_store=store)
+    manager = ProcessManager(effective_for_servers(config), credential_store=store)
 
-    server = manager.build_server(config)
+    server = manager.build_server("dispatcher")
 
     assert server.config is not config
     assert server.config == config
@@ -491,7 +508,7 @@ def test_one_shot_call_uses_process_manager_server_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = authenticated_config("stdio")
-    built: list[McpServerConfig] = []
+    built: list[str] = []
 
     class CallSession:
         async def call_tool(self, _tool: str, _arguments: dict[str, Any]) -> Any:
@@ -507,17 +524,17 @@ def test_one_shot_call_uses_process_manager_server_factory(
             return None
 
     def build_server(
-        _manager: ProcessManager, server_config: McpServerConfig
+        _manager: ProcessManager, server_id: str
     ) -> CallServer:
-        built.append(server_config)
+        built.append(server_id)
         return CallServer()
 
     monkeypatch.setattr(ProcessManager, "build_server", build_server)
-    effective = SimpleNamespace(diagnostic_only=False, mcp_servers=[config])
+    effective = effective_for_servers(config)
 
     cmd_call(effective, "dispatcher", "health", "{}")  # type: ignore[arg-type]
 
-    assert built == [config]
+    assert built == ["dispatcher"]
 
 
 def test_one_shot_authenticated_startup_failure_is_sanitized_and_nonzero(
@@ -530,7 +547,7 @@ def test_one_shot_authenticated_startup_failure_is_sanitized_and_nonzero(
         "gearcore_hub.process_manager.sse_client", lambda *_a, **_k: context
     )
     config = authenticated_config("sse")
-    effective = SimpleNamespace(diagnostic_only=False, mcp_servers=[config])
+    effective = effective_for_servers(config)
 
     with pytest.raises(SystemExit) as exc:
         cmd_call(
@@ -659,17 +676,21 @@ async def test_concurrent_registration_builds_starts_and_publishes_once(
         async def stop(self) -> None:
             self.stops += 1
 
-    def build(_config: McpServerConfig) -> Any:
+    def build(_server_id: str) -> Any:
         candidate = Candidate()
         candidates.append(candidate)
         return candidate
 
-    manager = ProcessManager(credential_store=RecordingCredentialStore())
-    monkeypatch.setattr(manager, "build_server", build)
     config = authenticated_config("sse")
+    manager = ProcessManager(
+        effective_for_servers(config),
+        credential_store=RecordingCredentialStore(),
+    )
+    monkeypatch.setattr(manager, "build_server", build)
 
     registrations = [
-        asyncio.create_task(manager.register_and_start(config)) for _ in range(4)
+        asyncio.create_task(manager.register_and_start("dispatcher"))
+        for _ in range(4)
     ]
     await start_entered.wait()
     await asyncio.sleep(0)
@@ -703,21 +724,24 @@ async def test_failed_or_cancelled_registration_releases_reservation_for_retry(
         async def stop(self) -> None:
             self.stops += 1
 
-    def build(_config: McpServerConfig) -> Any:
+    def build(_server_id: str) -> Any:
         candidate = Candidate(block=not candidates)
         candidates.append(candidate)
         return candidate
 
-    manager = ProcessManager(credential_store=RecordingCredentialStore())
-    monkeypatch.setattr(manager, "build_server", build)
     config = authenticated_config("sse")
-    first = asyncio.create_task(manager.register_and_start(config))
+    manager = ProcessManager(
+        effective_for_servers(config),
+        credential_store=RecordingCredentialStore(),
+    )
+    monkeypatch.setattr(manager, "build_server", build)
+    first = asyncio.create_task(manager.register_and_start("dispatcher"))
     await first_started.wait()
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first
 
-    await manager.register_and_start(config)
+    await manager.register_and_start("dispatcher")
 
     assert len(candidates) == 2
     assert candidates[0].stops == 1
@@ -744,18 +768,21 @@ async def test_failed_registration_releases_reservation_for_explicit_retry(
         async def stop(self) -> None:
             self.stops += 1
 
-    def build(_config: McpServerConfig) -> Any:
+    def build(_server_id: str) -> Any:
         candidate = Candidate(fail=not candidates)
         candidates.append(candidate)
         return candidate
 
-    manager = ProcessManager(credential_store=RecordingCredentialStore())
-    monkeypatch.setattr(manager, "build_server", build)
     config = authenticated_config("sse")
+    manager = ProcessManager(
+        effective_for_servers(config),
+        credential_store=RecordingCredentialStore(),
+    )
+    monkeypatch.setattr(manager, "build_server", build)
 
     with pytest.raises(RuntimeError, match="candidate failed"):
-        await manager.register_and_start(config)
-    await manager.register_and_start(config)
+        await manager.register_and_start("dispatcher")
+    await manager.register_and_start("dispatcher")
 
     assert len(candidates) == 2
     assert candidates[0].stops == 1
@@ -786,11 +813,13 @@ async def test_shutdown_racing_registration_cannot_orphan_candidate(
             await stop_release.wait()
 
     candidate = Candidate()
-    manager = ProcessManager(credential_store=RecordingCredentialStore())
-    monkeypatch.setattr(manager, "build_server", lambda _config: candidate)
-    registration = asyncio.create_task(
-        manager.register_and_start(authenticated_config("sse"))
+    config = authenticated_config("sse")
+    manager = ProcessManager(
+        effective_for_servers(config),
+        credential_store=RecordingCredentialStore(),
     )
+    monkeypatch.setattr(manager, "build_server", lambda _server_id: candidate)
+    registration = asyncio.create_task(manager.register_and_start("dispatcher"))
     await start_entered.wait()
     shutdown = asyncio.create_task(manager.shutdown_all())
     await asyncio.sleep(0)
@@ -1299,22 +1328,25 @@ async def test_manager_retains_failed_start_candidate_until_cleanup_completes(
             if self.stops == 1:
                 raise asyncio.CancelledError(RUNTIME_SECRET)
 
-    def build(_config: McpServerConfig) -> Any:
+    def build(_server_id: str) -> Any:
         candidate = Candidate()
         candidates.append(candidate)
         return candidate
 
-    manager = ProcessManager(credential_store=RecordingCredentialStore())
-    monkeypatch.setattr(manager, "build_server", build)
     config = authenticated_config("sse")
+    manager = ProcessManager(
+        effective_for_servers(config),
+        credential_store=RecordingCredentialStore(),
+    )
+    monkeypatch.setattr(manager, "build_server", build)
 
     with pytest.raises(asyncio.CancelledError) as exc:
-        await manager.register_and_start(config)
+        await manager.register_and_start("dispatcher")
     assert_exception_graph_is_sanitized(exc.value)
     assert manager._pending_cleanup == {"dispatcher": candidates[0]}
 
     with pytest.raises(RuntimeError, match="cleanup is incomplete"):
-        await manager.register_and_start(config)
+        await manager.register_and_start("dispatcher")
     assert len(candidates) == 1
 
     await manager.shutdown_all()
@@ -1344,22 +1376,25 @@ async def test_shutdown_retains_cancelled_cleanup_and_allows_unrelated_ids(
     dispatcher = Candidate(cancel_once=True)
     unrelated = Candidate(cancel_once=False)
     later = Candidate(cancel_once=False)
-    manager = ProcessManager(credential_store=RecordingCredentialStore())
     configs = {
         "dispatcher": authenticated_config("sse"),
         "other": McpServerConfig(id="other", type="sse", url="https://other.invalid"),
         "later": McpServerConfig(id="later", type="sse", url="https://later.invalid"),
     }
+    manager = ProcessManager(
+        effective_for_servers(*configs.values()),
+        credential_store=RecordingCredentialStore(),
+    )
     candidates = {
         "dispatcher": dispatcher,
         "other": unrelated,
         "later": later,
     }
     monkeypatch.setattr(
-        manager, "build_server", lambda config: candidates[config.id]
+        manager, "build_server", lambda server_id: candidates[server_id]
     )
-    await manager.register_and_start(configs["dispatcher"])
-    await manager.register_and_start(configs["other"])
+    await manager.register_and_start("dispatcher")
+    await manager.register_and_start("other")
 
     with pytest.raises(KeyboardInterrupt) as exc:
         await manager.shutdown_all()
@@ -1367,7 +1402,7 @@ async def test_shutdown_retains_cancelled_cleanup_and_allows_unrelated_ids(
     assert manager._pending_cleanup == {"dispatcher": dispatcher}
     assert unrelated.stops == 1
 
-    await manager.register_and_start(configs["later"])
+    await manager.register_and_start("later")
     assert manager.servers == {"later": later}
     await manager.shutdown_all()
     await manager.shutdown_all()
@@ -1418,11 +1453,17 @@ async def test_cancelled_shutdown_keeps_gate_and_drains_inflight_registration(
 
     candidate = Candidate()
     owned = Owned()
-    manager = ProcessManager(credential_store=RecordingCredentialStore())
-    monkeypatch.setattr(manager, "build_server", lambda _config: candidate)
-    manager.servers["owned"] = owned  # type: ignore[assignment]
     config = authenticated_config("sse")
-    registration = asyncio.create_task(manager.register_and_start(config))
+    other = McpServerConfig(
+        id="other", type="sse", url="https://other.invalid"
+    )
+    manager = ProcessManager(
+        effective_for_servers(config, other),
+        credential_store=RecordingCredentialStore(),
+    )
+    monkeypatch.setattr(manager, "build_server", lambda _server_id: candidate)
+    manager.servers["owned"] = owned  # type: ignore[assignment]
+    registration = asyncio.create_task(manager.register_and_start("dispatcher"))
     await start_entered.wait()
     shutdown = asyncio.create_task(manager.shutdown_all())
     while not manager._shutting_down:
@@ -1432,11 +1473,9 @@ async def test_cancelled_shutdown_keeps_gate_and_drains_inflight_registration(
     await asyncio.wait_for(start_cancelled.wait(), timeout=0.5)
 
     with pytest.raises(RuntimeError, match="shutting down"):
-        await manager.register_and_start(config)
+        await manager.register_and_start("dispatcher")
     with pytest.raises(RuntimeError, match="shutting down"):
-        await manager.register_and_start(
-            McpServerConfig(id="other", type="sse", url="https://other.invalid")
-        )
+        await manager.register_and_start("other")
     assert manager._shutting_down is True
     assert "dispatcher" not in manager.servers
 
@@ -1466,7 +1505,9 @@ async def test_cancelled_shutdown_keeps_gate_and_drains_inflight_registration(
 
 @pytest.mark.asyncio
 async def test_normal_shutdown_without_reservations_is_idempotent() -> None:
-    manager = ProcessManager(credential_store=RecordingCredentialStore())
+    manager = ProcessManager(
+        effective_for_servers(), credential_store=RecordingCredentialStore()
+    )
 
     await manager.shutdown_all()
     await manager.shutdown_all()

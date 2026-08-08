@@ -95,7 +95,9 @@ class GearCoreHub:
         credential_store: CredentialStore | None = None,
     ):
         self.config = config
-        self.process_manager = ProcessManager(credential_store=credential_store)
+        self.process_manager = ProcessManager(
+            config, credential_store=credential_store
+        )
         self.skill_manager = SkillManager(config)
         self.conflict_resolver = ConflictResolver(config.resolution.model_dump())
         self.resolved_tool_map: dict = {}
@@ -287,7 +289,7 @@ class GearCoreHub:
         for server_cfg in self.config.mcp_servers:
             try:
                 await asyncio.wait_for(
-                    self.process_manager.register_and_start(server_cfg),
+                    self.process_manager.register_and_start(server_cfg.id),
                     timeout=15.0,
                 )
             except TimeoutError:
@@ -579,15 +581,11 @@ def cmd_call(
         print(f"error: {', '.join(config.diagnostic_codes)}")
         sys.exit(1)
 
-    # Find the server config (use effective config to respect project scope)
-    server_cfg = None
-    for s in config.mcp_servers:
-        if s.id == server_id:
-            server_cfg = s
-            break
+    # Resolve through the same unambiguous effective lookup as ProcessManager.
+    server_cfg = config.mcp_server(server_id)
 
     if not server_cfg:
-        print(f"error: server '{server_id}' not found in gearcore config")
+        print("error: capability_denied")
         sys.exit(1)
 
     # config.mcp_servers already filters to enabled servers, but double-check
@@ -602,8 +600,10 @@ def cmd_call(
         sys.exit(1)
 
     async def _run():
-        process_manager = ProcessManager(credential_store=credential_store)
-        server = process_manager.build_server(server_cfg)
+        process_manager = ProcessManager(
+            config, credential_store=credential_store
+        )
+        server = process_manager.build_server(server_id)
         try:
             await server.start()
             result = await server.session.call_tool(tool, tool_args)
