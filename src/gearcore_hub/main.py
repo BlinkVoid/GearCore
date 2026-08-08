@@ -11,6 +11,7 @@ Subcommands:
   add-mcp        Register a new MCP server
   add-skill      Register a skill bundle
   add-cli        Wrap a CLI program into a skill via CLI-Anything
+  profile-set    Create or replace a global capability profile
   remove         Remove an MCP server or skill
   sync           Install/update the GearCore self-skill on AI CLI tools
 
@@ -22,6 +23,7 @@ Usage:
   gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
   gearcore add-skill <path> [--scope global|project] [--symlink]
   gearcore add-cli <program> [--scope global|project]
+  gearcore profile-set <name> [capability options]
   gearcore remove mcp <id> | skill <name> [--scope global|project]
   gearcore sync [--tool claude|codex|kimi|opencode] [--dry-run] [--remove]
   gearcore status
@@ -32,8 +34,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
+import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 from mcp.server import NotificationOptions, Server
@@ -43,7 +48,8 @@ from mcp.types import TextContent, Tool
 
 from gearcore_hub.config import EffectiveConfig, load_config
 from gearcore_hub.conflict_resolver import ConflictResolver
-from gearcore_hub.credentials import CredentialStore
+from gearcore_hub.credentials import CredentialError, CredentialStore
+from gearcore_hub.logging_utils import silence_logger
 from gearcore_hub.process_manager import (
     MCPAuthenticationError,
     MCPBackendStartError,
@@ -61,6 +67,19 @@ logging.basicConfig(
 logger = logging.getLogger("gearcore")
 
 AUTHENTICATED_BACKEND_FAILURE_MESSAGE = "authenticated backend request failed"
+
+
+_SAFE_STATUS_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+_silence_logger = silence_logger
+
+
+def _status_token(value: object) -> str:
+    text = str(value)
+    if _SAFE_STATUS_TOKEN.fullmatch(text) is not None:
+        return text
+    return json.dumps(text, ensure_ascii=True, separators=(",", ":"))
 
 
 # ---------------------------------------------------------------------------
@@ -319,57 +338,153 @@ class GearCoreHub:
 # ---------------------------------------------------------------------------
 
 
-def cmd_status(config: EffectiveConfig):
+def cmd_status(
+    config: EffectiveConfig,
+    *,
+    credential_store: CredentialStore | None = None,
+):
+    def ids(values: Iterable[str]) -> str:
+        ordered = sorted({_status_token(value) for value in values})
+        return ",".join(ordered) if ordered else "none"
+
     if config.diagnostic_only:
-        print("\nGearCore — diagnostic-only")
-        print("  Active server IDs: (none)")
-        print("  Denied server IDs: (none)")
-        print(f"  Capability diagnostic: {', '.join(config.diagnostic_codes)}")
-        print()
+        # Only launch/configuration policy diagnostics belong in status. An
+        # authenticated backend runtime failure is deliberately ephemeral.
+        policy_diagnostics = config.diagnostic_codes
+        print("GearCore status")
+        print(f"profile: {_status_token(config.profile_name)}")
+        print(f"source: {_status_token(config.profile_source)}")
+        print(
+            "enforced_profile: "
+            f"{_status_token(config.enforced_profile_name) if config.enforced_profile_name else 'none'}"
+        )
+        print("constrained: true")
+        print("active_mcp: none")
+        print("denied_mcp: none")
+        print("protected_mcp: none")
+        print("active_skills: none")
+        print("denied_skills: none")
+        print("protected_skills: none")
+        print(f"diagnostics: {ids(policy_diagnostics)}")
         return
 
-    print(f"\nGearCore — context: {config.context_name}")
-    print(f"  Profile: {config.profile_name}")
-    print(f"  Profile source: {config.profile_source}")
-    if config.enforced_profile_name is not None:
-        print(f"  Enforced profile: {config.enforced_profile_name}")
+    skill_registry_unavailable = False
+    try:
+        for skill_root in config.skills_dirs:
+            if skill_root.is_symlink() and not skill_root.exists():
+                raise OSError("broken skill registry root")
+            if skill_root.exists() and not skill_root.is_dir():
+                raise OSError("invalid skill registry root")
+        with _silence_logger("gearcore.skill_manager"):
+            skill_manager = SkillManager(config)
+        global_skills = tuple(
+            name
+            for name, bundle in skill_manager.skills.items()
+            if not bundle.is_project_local
+        )
+        project_skills = tuple(
+            name
+            for name, bundle in skill_manager.skills.items()
+            if bundle.is_project_local
+        )
+        resolved_skills = config.resolve_skill_capabilities(
+            global_skills, project_skills
+        )
+        loaded_skill_names = set(skill_manager.skills)
+        protected_skill_names = set(resolved_skills.protected)
+        trusted_protected: set[str] = set()
+        if protected_skill_names:
+            from gearcore_hub.registry import _trusted_global_skill_ids
+
+            try:
+                trusted_global, _conflicting_global = _trusted_global_skill_ids(
+                    config.global_cfg
+                )
+                trusted_protected = protected_skill_names.intersection(
+                    trusted_global
+                )
+            except ValueError:
+                skill_registry_unavailable = True
+        unavailable_protected = protected_skill_names.difference(
+            trusted_protected
+        )
+        available_loaded_skill_names = loaded_skill_names.difference(
+            unavailable_protected
+        )
+        active_skills = tuple(
+            skill_id
+            for skill_id in resolved_skills.active
+            if skill_id in available_loaded_skill_names
+        )
+        if skill_manager.broken_skills:
+            skill_registry_unavailable = True
+    except OSError:
+        resolved_skills = config.resolve_skill_capabilities((), ())
+        active_skills = ()
+        skill_registry_unavailable = True
+        unavailable_protected = set()
+
+    store = credential_store or CredentialStore()
+    active_mcp_ids: list[str] = []
+    credential_unavailable = False
+    for server in config.mcp_servers:
+        if server.auth is not None:
+            try:
+                store.check(server.auth.credential_ref)
+            except CredentialError:
+                credential_unavailable = True
+                continue
+        active_mcp_ids.append(server.id)
+
+    policy_diagnostics = (
+        *config.diagnostic_codes,
+        *(("skill_registry_unavailable",) if skill_registry_unavailable else ()),
+        *(("protected_skill_unavailable",) if unavailable_protected else ()),
+        *(("credential_unavailable",) if credential_unavailable else ()),
+    )
     is_constrained = (
         config.profile.constrained or config.enforced_profile_name is not None
     )
-    print(f"  Constrained: {is_constrained}")
-    active_ids = ", ".join(config.active_mcp_server_ids) or "(none)"
-    denied_ids = ", ".join(config.denied_mcp_server_ids) or "(none)"
-    print(f"  Active server IDs: {active_ids}")
-    print(f"  Denied server IDs: {denied_ids}")
-    if config.project_root:
-        print(f"  Project root: {config.project_root}")
-
-    print("\nMCP servers (effective):")
-    for s in config.mcp_servers:
-        print(f"  [{s.type}] {s.id}")
-
-    print("\nSkills dirs:")
-    for d in config.skills_dirs:
-        print(f"  {d}")
-
-    print("\nDisclosure:")
-    disc = config.disclosure
-    print(f"  strategy: {disc.strategy}")
-    print(f"  core_skills: {disc.core_skills or '(none)'}")
-    print(f"  activation_threshold: {disc.activation_threshold}")
+    print("GearCore status")
+    print(f"profile: {_status_token(config.profile_name)}")
+    print(f"source: {_status_token(config.profile_source)}")
+    print(
+        "enforced_profile: "
+        f"{_status_token(config.enforced_profile_name) if config.enforced_profile_name else 'none'}"
+    )
+    print(f"constrained: {str(is_constrained).lower()}")
+    print(f"active_mcp: {ids(active_mcp_ids)}")
+    print(f"denied_mcp: {ids(config.denied_mcp_server_ids)}")
+    print(f"protected_mcp: {ids(config.profile.scope.mcp_servers.protected)}")
+    print(f"active_skills: {ids(active_skills)}")
+    print(f"denied_skills: {ids(resolved_skills.denied)}")
+    print(f"protected_skills: {ids(resolved_skills.protected)}")
+    print(f"diagnostics: {ids(policy_diagnostics)}")
+    # Retain the established human-readable labels while the lower-case fields
+    # above provide a stable gate-oriented surface.
+    print(f"Profile: {_status_token(config.profile_name)}")
+    if config.enforced_profile_name is not None:
+        print(f"Enforced profile: {_status_token(config.enforced_profile_name)}")
+    print(f"Active server IDs: {ids(active_mcp_ids)}")
+    print(f"Denied server IDs: {ids(config.denied_mcp_server_ids)}")
     from gearcore_hub.vendor import get_upstream_commit, load_vendor_manifest
 
-    manifest = load_vendor_manifest()
+    with _silence_logger("gearcore.vendor"):
+        manifest = load_vendor_manifest()
     if manifest:
         print("\nVendored skills:")
         sha = manifest.vendored_commit
         short_sha = sha[:12] if len(sha) >= 12 else sha
-        print(f"  superpowers @ {short_sha} ({manifest.vendored_at})")
-        upstream = get_upstream_commit(manifest.source, manifest.source_ref)
+        print(
+            "  superpowers @ "
+            f"{_status_token(short_sha)} ({_status_token(manifest.vendored_at)})"
+        )
+        with _silence_logger("gearcore.vendor"):
+            upstream = get_upstream_commit(manifest.source, manifest.source_ref)
         if upstream and upstream != manifest.vendored_commit:
             upstream_short = upstream[:12] if len(upstream) >= 12 else upstream
             print(
-                f"  update available: {upstream_short} "
+                f"  update available: {_status_token(upstream_short)} "
                 "(run 'gearcore update-superpowers' to refresh)"
             )
 
@@ -631,6 +746,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_add_cli.add_argument("program", help="Program name or path (e.g. ffmpeg)")
     p_add_cli.add_argument("--scope", default="global", choices=["global", "project"])
 
+    # profile-set
+    p_profile = sub.add_parser(
+        "profile-set", help="Create or replace a global capability profile"
+    )
+    p_profile.add_argument("name", help="Global profile name")
+    for option in ("mcp-include", "mcp-deny", "mcp-protect"):
+        p_profile.add_argument(f"--{option}", action="append", default=[])
+    for option in ("skill-include", "skill-deny", "skill-protect"):
+        p_profile.add_argument(f"--{option}", action="append", default=[])
+    p_profile.add_argument("--core-skill", action="append", default=[])
+    p_profile.add_argument("--constrained", action="store_true")
+    p_profile.add_argument("--default", dest="make_default", action="store_true")
+
     # remove
     p_remove = sub.add_parser("remove", help="Remove an MCP server or skill")
     p_remove.add_argument("type", choices=["mcp", "skill"])
@@ -684,15 +812,55 @@ def main():
         logger.debug("Verbose logging enabled")
 
     project_path = Path(args.project) if args.project is not None else None
-    config = load_config(
-        project=project_path,
-        global_config_path=Path(args.config).resolve() if args.config else None,
-        profile_name=args.profile,
-        context_envelope=_resolve_launch_path(args.context_envelope),
-        envelope_public_key=_resolve_launch_path(args.envelope_public_key),
-    )
-
     command = args.command or "serve"
+
+    # Registry authority mutation must not auto-discover or parse a project.
+    # It validates and atomically mutates the requested global document itself.
+    if command == "profile-set":
+        from gearcore_hub.registry import set_profile
+
+        if project_path is not None:
+            print("Error: profile-set is global-only", file=sys.stderr)
+            raise SystemExit(1)
+        try:
+            result = set_profile(
+                args.name,
+                config_path=(Path(args.config).expanduser() if args.config else None),
+                mcp_include=args.mcp_include,
+                mcp_deny=args.mcp_deny,
+                mcp_protect=args.mcp_protect,
+                skill_include=args.skill_include,
+                skill_deny=args.skill_deny,
+                skill_protect=args.skill_protect,
+                core_skills=args.core_skill,
+                constrained=args.constrained,
+                make_default=args.make_default,
+            )
+        except (ValueError, RuntimeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
+        action = "updated" if result.changed else "unchanged"
+        print(f"Profile '{result.profile}' {action}")
+        return
+
+    config_log_context = (
+        _silence_logger("gearcore.config")
+        if command in ("status", "list")
+        else contextlib.nullcontext()
+    )
+    skill_log_context = (
+        _silence_logger("gearcore.skill_manager")
+        if command in ("status", "list")
+        else contextlib.nullcontext()
+    )
+    with config_log_context, skill_log_context:
+        config = load_config(
+            project=project_path,
+            global_config_path=Path(args.config).resolve() if args.config else None,
+            profile_name=args.profile,
+            context_envelope=_resolve_launch_path(args.context_envelope),
+            envelope_public_key=_resolve_launch_path(args.envelope_public_key),
+        )
 
     if command in ("status", "list"):
         cmd_status(config)
@@ -765,7 +933,7 @@ def main():
                 project_root=project_path,
             )
             print(f"CLI skill scaffolded at {dest}")
-        except (RuntimeError, FileExistsError) as exc:
+        except (RuntimeError, FileExistsError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         return
@@ -779,7 +947,7 @@ def main():
             else:
                 remove_skill(args.name, scope=args.scope, project_root=project_path)
             print(f"Removed {args.type} '{args.name}'")
-        except (KeyError, FileNotFoundError) as exc:
+        except (KeyError, FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         return

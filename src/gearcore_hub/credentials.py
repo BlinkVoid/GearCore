@@ -116,3 +116,13 @@ class CredentialStore:
         if not value:
             raise CredentialError("empty credential")
         return SecretStr(value)
+
+    def check(self, credential_ref: SecretStr) -> None:
+        """Validate one opaque reference and credential without returning either."""
+
+        reference = ""
+        try:
+            reference = credential_ref.get_secret_value()
+            self.read(reference)
+        finally:
+            reference = ""
