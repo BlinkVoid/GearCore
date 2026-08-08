@@ -244,6 +244,29 @@ def test_one_sided_explicit_envelope_input_fails_closed(
     assert result.mcp_servers == []
 
 
+@pytest.mark.parametrize(
+    ("envelope_value", "key_value"),
+    [("", ""), ("   ", None), (None, "   ")],
+)
+def test_empty_config_api_envelope_inputs_are_still_explicit(
+    tmp_path: Path,
+    envelope_value: str | None,
+    key_value: str | None,
+):
+    result = load_config(
+        global_config_path=_global_config(tmp_path),
+        context_envelope=envelope_value,
+        envelope_public_key=key_value,
+        now=NOW,
+    )
+
+    assert result.diagnostic_only is True
+    assert result.profile_source == "invalid-envelope"
+    assert result.enforced_profile_name is None
+    assert result.mcp_servers == []
+    assert result.diagnostic_codes == ("invalid_launch_envelope",)
+
+
 def test_valid_envelope_rejects_requested_authority_expansion(
     tmp_path: Path, signing_material
 ):
@@ -322,6 +345,80 @@ def test_envelope_still_blocks_project_expansion_for_narrower_unconstrained_prof
     assert result.profile.constrained is False
     assert result.enforced_profile_name == "hive-worker"
     assert result.mcp_servers == []
+
+
+def test_alternate_profile_cannot_drop_envelope_protected_binding(
+    tmp_path: Path, signing_material
+):
+    private_key, public_key_path = signing_material
+    config_path = tmp_path / "protected-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 3,
+                "registry": {
+                    "mcp_servers": [
+                        {
+                            "id": "gateway",
+                            "type": "stdio",
+                            "command": "/trusted/gateway",
+                        }
+                    ]
+                },
+                "profiles": {
+                    "default": "operator",
+                    "entries": {
+                        "operator": {},
+                        "protected-worker": {
+                            "constrained": True,
+                            "scope": {
+                                "mcp_servers": {"protected": ["gateway"]}
+                            },
+                        },
+                        "unprotected-alternate": {"constrained": True},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    envelope_path, _ = _signed_envelope(
+        tmp_path, private_key, profile="protected-worker"
+    )
+    project = tmp_path / "hostile-project"
+    project_config = project / ".gearcore" / "config.yaml"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "registry": {
+                    "mcp_servers": [
+                        {
+                            "id": "gateway",
+                            "type": "stdio",
+                            "command": "/unsafe/replacement",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _load(
+        config_path,
+        envelope_path,
+        public_key_path,
+        profile="unprotected-alternate",
+        project=project,
+    )
+
+    assert result.diagnostic_only is True
+    assert result.profile_source == "envelope"
+    assert result.enforced_profile_name == "protected-worker"
+    assert result.mcp_servers == []
+    assert result.diagnostic_codes == ("envelope_authority_expansion",)
 
 
 @pytest.mark.asyncio

@@ -591,11 +591,13 @@ def main():
         global_config_path=Path(args.config).resolve() if args.config else None,
         profile_name=args.profile,
         context_envelope=(
-            Path(args.context_envelope).resolve() if args.context_envelope else None
+            Path(args.context_envelope).resolve()
+            if args.context_envelope is not None
+            else None
         ),
         envelope_public_key=(
             Path(args.envelope_public_key).resolve()
-            if args.envelope_public_key
+            if args.envelope_public_key is not None
             else None
         ),
     )

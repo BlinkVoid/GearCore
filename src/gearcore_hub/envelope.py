@@ -178,6 +178,9 @@ def verify_envelope_file(
 def _capability_policy_is_subset(
     candidate: CapabilityList, enforced: CapabilityList
 ) -> bool:
+    if not set(candidate.protected).issuperset(enforced.protected):
+        return False
+
     candidate_denied = set(candidate.deny).difference(candidate.protected)
     enforced_denied = set(enforced.deny).difference(enforced.protected)
     candidate_allowed = (

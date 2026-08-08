@@ -509,8 +509,8 @@ def load_config(
     global_config_path: Path | None = None,
     *,
     profile_name: str | None = None,
-    context_envelope: Path | None = None,
-    envelope_public_key: Path | None = None,
+    context_envelope: Path | str | None = None,
+    envelope_public_key: Path | str | None = None,
     now: int | None = None,
 ) -> EffectiveConfig:
     """

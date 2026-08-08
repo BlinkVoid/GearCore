@@ -1,8 +1,12 @@
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from gearcore_hub.config import load_config
 from gearcore_hub.main import build_parser, cmd_status
+from gearcore_hub.main import main as cli_main
 
 
 def test_update_superpowers_parser():
@@ -65,6 +69,51 @@ def test_launch_policy_flags_are_available_to_runtime_commands():
         assert args.profile == "hive-worker"
         assert args.context_envelope == "/safe/envelope.json"
         assert args.envelope_public_key == "/safe/public-key.json"
+
+
+@pytest.mark.parametrize(
+    "launch_args",
+    [
+        ["--context-envelope", "", "--envelope-public-key", ""],
+        ["--context-envelope", "   ", "--envelope-public-key", "   "],
+        ["--context-envelope", ""],
+        ["--envelope-public-key", ""],
+        ["--context-envelope", "   "],
+        ["--envelope-public-key", "   "],
+        ["--context-envelope", "secret-missing-envelope"],
+        ["--envelope-public-key", "secret-missing-key"],
+    ],
+)
+def test_explicit_empty_envelope_cli_inputs_never_fall_back_to_operator(
+    tmp_path, monkeypatch, capsys, launch_args
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """\
+version: 3
+profiles:
+  default: operator
+  entries:
+    operator: {}
+    hive-worker:
+      constrained: true
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gearcore", "--config", str(config_path), *launch_args, "status"],
+    )
+
+    cli_main()
+
+    output = capsys.readouterr().out
+    assert "invalid_launch_envelope" in output
+    assert "Profile: operator" not in output
+    for value in launch_args[1::2]:
+        if value.strip():
+            assert value not in output
 
 
 def test_status_prints_vendor_manifest(capsys):
