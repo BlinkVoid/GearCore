@@ -132,36 +132,6 @@ class _SanitizedJsonSchemaValidator:
         return validated
 
 
-class _SanitizedSchemaSerializer:
-    """Serialize only a detached candidate that passed the model boundary."""
-
-    __slots__ = ("_serializer",)
-
-    def __init__(self, serializer: Any) -> None:
-        self._serializer = serializer
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._serializer, name)
-
-    def to_python(self, value: object, *args: Any, **kwargs: Any) -> Any:
-        candidate = (
-            value._validated_state()
-            if isinstance(value, _SafeModelSurfaces)
-            else value
-        )
-        return self._serializer.to_python(candidate, *args, **kwargs)
-
-    def to_json(self, value: object, *args: Any, **kwargs: Any) -> bytes:
-        candidate = (
-            value._validated_state()
-            if isinstance(value, _SafeModelSurfaces)
-            else value
-        )
-        return cast(
-            bytes, self._serializer.to_json(candidate, *args, **kwargs)
-        )
-
-
 def _validated_raw_state(model: BaseModel, error_message: str) -> dict[str, Any]:
     """Copy model state while rejecting keys injected outside Pydantic."""
 
@@ -210,6 +180,16 @@ class _SafeModelSurfaces:
     def __iter__(self) -> Generator[tuple[str, Any]]:
         yield from self.model_dump().items()  # type: ignore[attr-defined]
 
+    def __str__(self) -> str:
+        try:
+            candidate = self._validated_state()
+        except McpConfigError:
+            return f"{type(self).__name__}(<invalid configuration>)"
+        return BaseModel.__str__(candidate)  # type: ignore[arg-type]
+
+    def __format__(self, format_spec: str) -> str:
+        return format(str(self), format_spec)
+
     def __getstate__(self) -> dict[str, Any]:
         candidate = self._detached_validated_state()
         state = BaseModel.__getstate__(candidate)  # type: ignore[arg-type]
@@ -251,7 +231,9 @@ class _FrozenMapping(tuple[tuple[str, Any], ...], Mapping[str, Any]):
     ) -> _FrozenMapping:
         return tuple.__new__(cls, items)
 
-    def __getitem__(self, key: str) -> Any:  # type: ignore[override]
+    def __getitem__(self, key: object) -> Any:  # type: ignore[override]
+        if isinstance(key, (int, slice)):
+            return tuple.__getitem__(self, key)
         for candidate, value in tuple.__iter__(self):
             if candidate == key:
                 return value
@@ -269,6 +251,20 @@ class _FrozenMapping(tuple[tuple[str, Any], ...], Mapping[str, Any]):
     def values(self) -> Iterator[Any]:  # type: ignore[override]
         return (value for _, value in tuple.__iter__(self))
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Mapping) or len(self) != len(other):
+            return False
+        try:
+            return all(
+                key in other and _config_values_equal(value, other[key])
+                for key, value in tuple.__iter__(self)
+            )
+        except (KeyError, TypeError):
+            return False
+
+    def __hash__(self) -> int:
+        return hash(frozenset(tuple.__iter__(self)))
+
     def __repr__(self) -> str:
         return repr(_thaw_config_value(self))
 
@@ -282,38 +278,63 @@ class _FrozenMapping(tuple[tuple[str, Any], ...], Mapping[str, Any]):
         return type(self), (tuple(tuple.__iter__(self)),)
 
 
-class _CredentialReference(str):
-    """Immutable, masked credential identifier used inside auth models."""
-
-    __slots__ = ()
-
-    def __new__(cls, value: str) -> _CredentialReference:
-        return str.__new__(cls, value)
-
-    def __str__(self) -> str:
-        return "**********" if self else ""
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({str(self)!r})"
-
-    def __format__(self, format_spec: str) -> str:
-        return format(str(self), format_spec)
-
-    def get_secret_value(self) -> str:
-        return self[:]
-
-    def __copy__(self) -> Self:
-        return self
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
-        return self
-
-    def __reduce__(self) -> tuple[type[Self], tuple[str]]:
-        return type(self), (self.get_secret_value(),)
-
-
 _JSON_SCALAR_TYPES = (str, int, float, bool, type(None))
 _MAX_CONFIG_NESTING = 64
+
+
+def _config_values_equal(
+    left: object,
+    right: object,
+    *,
+    depth: int = 0,
+    seen: set[tuple[int, int]] | None = None,
+) -> bool:
+    """Compare immutable snapshots to their ordinary JSON/YAML equivalents."""
+
+    if depth > _MAX_CONFIG_NESTING:
+        return False
+    if seen is None:
+        seen = set()
+    pair = (id(left), id(right))
+    if pair in seen:
+        return True
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        if len(left) != len(right):
+            return False
+        seen.add(pair)
+        try:
+            return all(
+                key in right
+                and _config_values_equal(
+                    value,
+                    right[key],
+                    depth=depth + 1,
+                    seen=seen,
+                )
+                for key, value in left.items()
+            )
+        finally:
+            seen.remove(pair)
+    if isinstance(left, tuple) and type(right) in (list, tuple):
+        right_sequence = cast(list[object] | tuple[object, ...], right)
+        if len(left) != len(right_sequence):
+            return False
+        seen.add(pair)
+        try:
+            return all(
+                _config_values_equal(
+                    left_value,
+                    right_value,
+                    depth=depth + 1,
+                    seen=seen,
+                )
+                for left_value, right_value in zip(
+                    left, right_sequence, strict=True
+                )
+            )
+        finally:
+            seen.remove(pair)
+    return left == right
 
 
 def _freeze_config_value(
@@ -359,9 +380,7 @@ def _freeze_config_value(
             )
         finally:
             active.remove(identity)
-    if type(value) in _JSON_SCALAR_TYPES or isinstance(
-        value, _CredentialReference
-    ):
+    if type(value) in _JSON_SCALAR_TYPES or isinstance(value, SecretStr):
         return value
     raise McpConfigError("unsupported MCP configuration value")
 
@@ -571,9 +590,7 @@ def _materialize_nested_mappings(
             return materialized_items if type(value) is list else tuple(materialized_items)
         finally:
             active.remove(identity)
-    if type(value) in _JSON_SCALAR_TYPES or isinstance(
-        value, _CredentialReference
-    ):
+    if type(value) in _JSON_SCALAR_TYPES or isinstance(value, SecretStr):
         return value
     raise McpConfigError("unsupported MCP configuration value")
 
@@ -583,6 +600,8 @@ def _normalize_server_input(value: object) -> object:
 
     if not isinstance(value, Mapping):
         return value
+    if any(type(key) is not str for key in value):
+        raise McpConfigError("invalid MCP server configuration")
     normalized = {
         key: nested._validated_state().model_dump(round_trip=True)
         if key == "auth" and isinstance(nested, McpAuthConfig)
@@ -672,23 +691,13 @@ class _SanitizedConfigModel(_SafeModelSurfaces, BaseModel):
             )
 
     @classmethod
-    def _install_serialization_boundary(cls) -> None:
-        serializer = cls.__pydantic_serializer__
-        if not isinstance(serializer, _SanitizedSchemaSerializer):
-            cls.__pydantic_serializer__ = _SanitizedSchemaSerializer(  # type: ignore[assignment]
-                serializer
-            )
-
-    @classmethod
     def __pydantic_on_complete__(cls) -> None:
         cls._install_json_validation_boundary()
-        cls._install_serialization_boundary()
 
     @classmethod
     def model_rebuild(cls, **kwargs: Any) -> bool | None:
         rebuilt = super().model_rebuild(**kwargs)
         cls._install_json_validation_boundary()
-        cls._install_serialization_boundary()
         return rebuilt
 
     def __setattr__(self, field_name: str, value: Any) -> None:
@@ -722,8 +731,21 @@ class _SanitizedConfigModel(_SafeModelSurfaces, BaseModel):
     ) -> core_schema.CoreSchema:
         schema = handler(source_type)
         return core_schema.no_info_wrap_validator_function(
-            cls._validate_without_retaining_input, schema
+            cls._validate_without_retaining_input,
+            schema,
+            serialization=core_schema.wrap_serializer_function_ser_schema(
+                cls._serialize_validated_state
+            ),
         )
+
+    @classmethod
+    def _serialize_validated_state(
+        cls,
+        value: object,
+        handler: core_schema.SerializerFunctionWrapHandler,
+    ) -> object:
+        candidate = value._validated_state() if isinstance(value, cls) else value
+        return handler(candidate)
 
     @classmethod
     def _validate_without_retaining_input(
@@ -758,9 +780,7 @@ class McpAuthConfig(_SanitizedConfigModel):
 
     def __getattribute__(self, field_name: str) -> Any:
         value = super().__getattribute__(field_name)
-        if field_name == "credential_ref" and not isinstance(
-            value, _CredentialReference
-        ):
+        if field_name == "credential_ref" and not isinstance(value, SecretStr):
             raise McpConfigError("invalid MCP authentication configuration")
         return value
 
@@ -791,17 +811,6 @@ class McpAuthConfig(_SanitizedConfigModel):
         except CredentialError:
             raise ValueError("invalid credential reference") from None
 
-    @field_validator("credential_ref", mode="after")
-    @classmethod
-    def snapshot_reference(cls, value: SecretStr) -> Any:
-        if isinstance(value, _CredentialReference):
-            return value
-        return _CredentialReference(value.get_secret_value())
-
-    @field_serializer("credential_ref")
-    def serialize_reference(self, value: _CredentialReference, info: Any) -> Any:
-        return str(value) if info.mode == "json" else value
-
     @field_validator("stdio_environment")
     @classmethod
     def validate_environment(cls, value: str) -> str:
@@ -817,7 +826,7 @@ class McpAuthConfig(_SanitizedConfigModel):
         environment = state.get("stdio_environment")
         scheme = state.get("http_scheme")
         if (
-            not isinstance(credential, _CredentialReference)
+            not isinstance(credential, SecretStr)
             or not isinstance(environment, str)
             or not isinstance(scheme, str)
         ):
@@ -1019,7 +1028,7 @@ def _sanitize_registry_servers(data: Mapping[str, Any]) -> dict[str, Any]:
     servers: list[dict[str, Any]] = []
     for raw_server in raw_servers:
         if isinstance(raw_server, McpServerConfig):
-            server = raw_server
+            server = raw_server._validated_state()
             sanitized_server = server.model_dump()
         elif isinstance(raw_server, Mapping):
             materialized_server = _normalize_server_input(raw_server)
@@ -1110,23 +1119,13 @@ class _SanitizedRegistryConfigModel(_SafeModelSurfaces, BaseModel):
             )
 
     @classmethod
-    def _install_serialization_boundary(cls) -> None:
-        serializer = cls.__pydantic_serializer__
-        if not isinstance(serializer, _SanitizedSchemaSerializer):
-            cls.__pydantic_serializer__ = _SanitizedSchemaSerializer(  # type: ignore[assignment]
-                serializer
-            )
-
-    @classmethod
     def __pydantic_on_complete__(cls) -> None:
         cls._install_json_validation_boundary()
-        cls._install_serialization_boundary()
 
     @classmethod
     def model_rebuild(cls, **kwargs: Any) -> bool | None:
         rebuilt = super().model_rebuild(**kwargs)
         cls._install_json_validation_boundary()
-        cls._install_serialization_boundary()
         return rebuilt
 
     def model_copy(
@@ -1157,8 +1156,21 @@ class _SanitizedRegistryConfigModel(_SafeModelSurfaces, BaseModel):
     ) -> core_schema.CoreSchema:
         schema = handler(source_type)
         return core_schema.no_info_wrap_validator_function(
-            cls._sanitize_registry_for_validation, schema
+            cls._sanitize_registry_for_validation,
+            schema,
+            serialization=core_schema.wrap_serializer_function_ser_schema(
+                cls._serialize_validated_state
+            ),
         )
+
+    @classmethod
+    def _serialize_validated_state(
+        cls,
+        value: object,
+        handler: core_schema.SerializerFunctionWrapHandler,
+    ) -> object:
+        candidate = value._validated_state() if isinstance(value, cls) else value
+        return handler(candidate)
 
     @classmethod
     def _sanitize_registry_for_validation(
@@ -1336,14 +1348,15 @@ class EffectiveConfig:
         enforced_skill_bindings: frozenset[SkillBindingCeiling] | None = None,
         diagnostic_code: str | None = None,
     ):
+        validated_global = global_cfg._validated_state()
         global_cfg = GlobalConfig.model_validate(
-            global_cfg.model_dump(round_trip=True)
+            validated_global.model_dump(round_trip=True)
         )
         project_cfg = (
             None
             if project_cfg is None
             else ProjectConfig.model_validate(
-                project_cfg.model_dump(round_trip=True)
+                project_cfg._validated_state().model_dump(round_trip=True)
             )
         )
         self.global_cfg = global_cfg

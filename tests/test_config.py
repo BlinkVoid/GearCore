@@ -2,14 +2,17 @@
 
 import copy
 import json
+import logging
 import pickle
 import warnings
 from collections import UserDict, UserList, deque
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 import pytest
-from pydantic import SecretStr, TypeAdapter
+from pydantic import BaseModel, SecretStr, TypeAdapter
+from pydantic_core import PydanticSerializationError
 
 from gearcore_hub.config import (
     EffectiveConfig,
@@ -671,14 +674,16 @@ class TestMcpAuthConfig:
 
         assert SENTINEL not in repr(auth)
         for render in (auth.model_dump, auth.model_dump_json):
-            with pytest.raises(McpConfigError) as exc_info:
+            with pytest.raises(
+                (McpConfigError, PydanticSerializationError)
+            ) as exc_info:
                 render()
             _assert_exception_does_not_retain(exc_info.value, SENTINEL)
         with pytest.raises(McpConfigError) as compose_exc:
             McpServerConfig(id="legacy", auth=auth)
         _assert_exception_does_not_retain(compose_exc.value, SENTINEL)
 
-    def test_normal_state_apis_do_not_expose_mutable_auth_backing(self):
+    def test_auth_state_surfaces_keep_opaque_secret_references(self):
         auth = McpAuthConfig(credential_ref=SENTINEL)
         copies = [
             auth,
@@ -694,10 +699,8 @@ class TestMcpAuthConfig:
                 candidate.__getstate__()["__dict__"],
             ):
                 reference = surface["credential_ref"]
-                with pytest.raises(TypeError):
-                    vars(reference)
-                with pytest.raises(AttributeError):
-                    reference._secret_value = "replacement"
+                assert isinstance(reference, SecretStr)
+                assert SENTINEL not in repr(reference)
             rendered = (
                 repr(candidate)
                 + repr(candidate.model_dump())
@@ -911,7 +914,9 @@ class TestMcpAuthConfig:
         for consume in consumers:
             with (
                 warnings.catch_warnings(record=True) as caught,
-                pytest.raises(McpConfigError) as exc_info,
+                pytest.raises(
+                    (McpConfigError, PydanticSerializationError)
+                ) as exc_info,
             ):
                 consume()
             _assert_exception_does_not_retain(exc_info.value, SENTINEL)
@@ -929,19 +934,14 @@ class TestMcpAuthConfig:
                     None,
                 )
 
-    def test_internal_backing_values_are_attribute_less_and_hash_stable(self):
-        auth = McpAuthConfig(credential_ref="operator")
+    def test_frozen_mapping_is_attribute_less_and_hash_stable(self):
         config = GlobalConfig(registry={"metadata": {"nested": ["safe"]}})
-        reference = vars(auth)["credential_ref"]
         registry = vars(config)["registry"]
 
-        with pytest.raises(TypeError):
-            vars(reference)
-        before_hashes = (hash(reference), hash(registry))
-        for backing in (reference, registry):
-            with pytest.raises((AttributeError, TypeError)):
-                object.__setattr__(backing, "payload", SENTINEL)
-        assert (hash(reference), hash(registry)) == before_hashes
+        before_hash = hash(registry)
+        with pytest.raises((AttributeError, TypeError)):
+            object.__setattr__(registry, "payload", SENTINEL)
+        assert hash(registry) == before_hash
 
     @pytest.mark.parametrize(
         "bad_key",
@@ -1005,6 +1005,149 @@ class TestMcpAuthConfig:
         assert list(backing.items()) == list(registry.items())
         assert list(backing.values()) == list(registry.values())
         assert all(key in backing for key in registry)
+
+    def test_security_models_keep_native_schema_serializer(self):
+        for model_type in (
+            McpAuthConfig,
+            McpServerConfig,
+            GlobalConfig,
+            ProjectConfig,
+        ):
+            assert type(model_type.__pydantic_serializer__).__name__ == "SchemaSerializer"
+
+    @pytest.mark.parametrize(
+        "adapter_factory",
+        [
+            lambda: TypeAdapter(list[McpServerConfig]),
+            lambda: TypeAdapter(list[Any]),
+            lambda: TypeAdapter(list[object]),
+            lambda: TypeAdapter(list[object | None]),
+            lambda: TypeAdapter(Any),
+            lambda: TypeAdapter(object),
+        ],
+    )
+    def test_generic_serialization_uses_model_schema_boundary(
+        self, adapter_factory
+    ):
+        server = McpServerConfig(id="safe", args=["--mode", "safe"])
+        adapter = adapter_factory()
+        wrapped: object = server if adapter.core_schema.get("type") == "any" else [server]
+
+        vars(server)["args"] = ["--mode", "next"]
+        with warnings.catch_warnings(record=True) as caught:
+            dumped = adapter.dump_python(wrapped)
+            dumped_json = adapter.dump_json(wrapped)
+        assert not caught
+        assert "next" in repr(dumped)
+        assert b"next" in dumped_json
+
+        vars(server)["args"] = ["--token", SENTINEL]
+        for dump in (adapter.dump_python, adapter.dump_json):
+            with (
+                warnings.catch_warnings(record=True) as caught,
+                pytest.raises(
+                    (McpConfigError, PydanticSerializationError)
+                ) as exc_info,
+            ):
+                dump(wrapped)
+            _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+            assert SENTINEL not in repr(caught)
+
+    def test_nested_wrapper_serialization_uses_model_schema_boundary(self):
+        class Wrapper(BaseModel):
+            server: McpServerConfig
+
+        wrapper = Wrapper(server=McpServerConfig(id="safe"))
+        vars(wrapper.server)["args"] = ["--token", SENTINEL]
+
+        for dump in (wrapper.model_dump, wrapper.model_dump_json):
+            with (
+                warnings.catch_warnings(record=True) as caught,
+                pytest.raises(
+                    (McpConfigError, PydanticSerializationError)
+                ) as exc_info,
+            ):
+                dump()
+            _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+            assert SENTINEL not in repr(caught)
+
+    def test_credential_reference_is_opaque_standard_secret(self):
+        auth = McpAuthConfig(credential_ref=SENTINEL)
+        reference = auth.credential_ref
+
+        assert isinstance(reference, SecretStr)
+        assert auth.credential_id() == SENTINEL
+        assert SENTINEL not in repr(reference)
+        assert SENTINEL not in str(reference)
+        assert reference != SENTINEL
+        for operation in (
+            lambda: reference[:],
+            lambda: reference + "suffix",
+            lambda: reference.encode(),
+            lambda: json.dumps(reference),
+        ):
+            with pytest.raises((AttributeError, TypeError)):
+                operation()
+        assert isinstance(auth.model_dump()["credential_ref"], SecretStr)
+        assert SENTINEL not in auth.model_dump_json()
+
+    def test_mutated_secretstr_is_revalidated_at_downstream_boundaries(self):
+        auth = McpAuthConfig(credential_ref="operator")
+        # Arbitrary in-process object mutation is outside the config boundary.
+        vars(auth.credential_ref)["_secret_value"] = f"../{SENTINEL}"
+
+        with pytest.raises(PydanticSerializationError) as dump_exc:
+            auth.model_dump()
+        _assert_exception_does_not_retain(dump_exc.value, SENTINEL)
+        with pytest.raises(McpConfigError) as compose_exc:
+            McpServerConfig(id="safe", auth=auth)
+        _assert_exception_does_not_retain(compose_exc.value, SENTINEL)
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            McpServerConfig(id="legacy"),
+            GlobalConfig(),
+            ProjectConfig(),
+        ],
+    )
+    def test_string_formatting_and_logging_are_safe_after_corruption(
+        self, model, caplog
+    ):
+        if isinstance(model, McpServerConfig):
+            vars(model)["args"] = ["--token", SENTINEL]
+        else:
+            vars(model)["registry"] = {
+                "mcp_servers": [{"id": "x", "API_TOKEN": SENTINEL}]
+            }
+
+        with caplog.at_level(logging.WARNING, logger="gearcore.config-test"):
+            logging.getLogger("gearcore.config-test").warning("model=%s", model)
+        format_rendered = format(model, "")
+        percent_rendered = "%s".__mod__(model)
+        rendered = "\n".join(
+            (str(model), f"{model}", format_rendered, percent_rendered, caplog.text)
+        )
+        assert SENTINEL not in rendered
+        assert "invalid configuration" in rendered
+
+    def test_frozen_mapping_has_order_independent_mapping_equality_and_hash(self):
+        expected = {"a": {"nested": [1, 2]}, "b": 2}
+        first = vars(GlobalConfig(registry=expected))["registry"]
+        second = vars(
+            GlobalConfig(registry={"b": 2, "a": {"nested": [1, 2]}})
+        )["registry"]
+
+        assert first == second
+        assert first == expected
+        assert first == MappingProxyType(expected)
+        assert hash(first) == hash(second)
+
+    @pytest.mark.parametrize("bad_key", [1, SecretStr(SENTINEL), object()])
+    def test_server_root_mapping_keys_must_be_plain_strings(self, bad_key):
+        with pytest.raises(McpConfigError) as exc_info:
+            McpServerConfig.model_validate({"id": "safe", bad_key: SENTINEL})
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
 
     @pytest.mark.parametrize("method", ["model_validate", "model_validate_json"])
     def test_alternate_auth_validation_does_not_retain_unknown_input(
