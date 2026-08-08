@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import TypeAdapter
 
 from gearcore_hub.config import (
     EffectiveConfig,
@@ -239,6 +240,48 @@ class TestMcpAuthConfig:
 
         _assert_exception_does_not_retain(exc_info.value, SENTINEL)
 
+    @pytest.mark.parametrize(
+        ("model_type", "payload"),
+        [
+            (
+                McpAuthConfig,
+                {
+                    "credential_ref": "operator",
+                    "stdio_environment": "HIVE_AUTH",
+                    "unexpected": SENTINEL,
+                },
+            ),
+            (McpServerConfig, {"id": "legacy", "API_TOKEN": SENTINEL}),
+            (
+                GlobalConfig,
+                {
+                    "registry": {
+                        "mcp_servers": [{"id": "legacy", "API_TOKEN": SENTINEL}]
+                    }
+                },
+            ),
+            (
+                ProjectConfig,
+                {
+                    "registry": {
+                        "mcp_servers": [{"id": "legacy", "API_TOKEN": SENTINEL}]
+                    }
+                },
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("method", ["validate_python", "validate_json"])
+    def test_type_adapter_uses_sentinel_free_core_schema_boundary(
+        self, model_type, payload: dict[str, object], method: str
+    ):
+        adapter = TypeAdapter(model_type)
+        value: object = payload if method == "validate_python" else json.dumps(payload)
+
+        with pytest.raises(McpConfigError) as exc_info:
+            getattr(adapter, method)(value)
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
     @pytest.mark.parametrize("method", ["model_validate", "model_validate_json"])
     def test_alternate_auth_validation_does_not_retain_unknown_input(
         self, method: str
@@ -318,15 +361,21 @@ class TestMcpAuthConfig:
             ["--auth", SENTINEL],
             [f"--bearer={SENTINEL}"],
             ["--header", f"Authorization: Bearer {SENTINEL}"],
+            ["--HEADER", f"Authorization: Bearer {SENTINEL}"],
+            ["--http-header", f"Authorization: Bearer {SENTINEL}"],
             ["-H", f"authorization: bearer {SENTINEL}"],
             [f"--header=Authorization%3A%20Bearer%20{SENTINEL}"],
+            [f"--Headers=Authorization: Bearer {SENTINEL}"],
+            [f"--http-header=Authorization: Bearer {SENTINEL}"],
+            [f"--HTTP-HEADER=authorization: bearer {SENTINEL}"],
+            [f"--http_headers=authorization: bearer {SENTINEL}"],
             [f"-HX-API-Key: {SENTINEL}"],
         ],
     )
     def test_secret_bearing_arguments_are_rejected_without_retention(
         self, args: list[str]
     ):
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(McpConfigError) as exc_info:
             McpServerConfig(id="legacy", type="stdio", command="legacy", args=args)
 
         _assert_exception_does_not_retain(exc_info.value, SENTINEL)
@@ -338,6 +387,8 @@ class TestMcpAuthConfig:
             ["--password-policy", "strict"],
             ["--config", "/safe/config.yaml"],
             ["--header", "Accept: application/json"],
+            ["--HTTP-HEADER", "Accept: application/json"],
+            ["--headers=X-Mode: operator"],
             ["-H", "X-Mode: operator"],
         ],
     )
@@ -362,7 +413,7 @@ class TestMcpAuthConfig:
     def test_url_userinfo_and_sensitive_query_are_rejected_without_retention(
         self, url: str
     ):
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(McpConfigError) as exc_info:
             McpServerConfig(id="remote", type="sse", url=url)
 
         _assert_exception_does_not_retain(exc_info.value, SENTINEL)
@@ -598,7 +649,7 @@ class TestMcpAuthConfig:
     def test_bad_credential_reference_error_does_not_retain_input(self):
         bad_reference = f"../{SENTINEL}"
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(McpConfigError) as exc_info:
             McpServerConfig(
                 id="dispatcher",
                 type="stdio",

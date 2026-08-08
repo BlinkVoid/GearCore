@@ -9,7 +9,6 @@ Resolution order (highest priority last):
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -23,12 +22,13 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    GetCoreSchemaHandler,
     SecretStr,
     ValidationError,
     field_validator,
     model_validator,
 )
-from pydantic.config import ExtraValues
+from pydantic_core import core_schema
 
 from gearcore_hub.credentials import CredentialError, validate_credential_id
 from gearcore_hub.profiles import (
@@ -73,7 +73,7 @@ _SENSITIVE_CARRIER_SUFFIXES = {"header", "value"}
 _SENSITIVE_SEGMENT_PAIRS = {("access", "key"), ("api", "key"), ("private", "key")}
 
 
-class McpConfigError(ValueError):
+class McpConfigError(RuntimeError):
     """Stable error that never retains rejected configuration input."""
 
 
@@ -151,23 +151,36 @@ def _arguments_contain_plaintext_auth(value: object) -> bool:
     for index, argument in enumerate(value):
         if not isinstance(argument, str):
             continue
-        if argument in {"--header", "-H"}:
+        if argument == "-H":
             header = value[index + 1] if index + 1 < len(value) else None
             if _header_contains_plaintext_auth(header):
-                return True
-            continue
-        if argument.startswith("--header="):
-            if _header_contains_plaintext_auth(argument.partition("=")[2]):
                 return True
             continue
         if argument.startswith("-H") and len(argument) > 2:
             if _header_contains_plaintext_auth(argument[2:]):
                 return True
             continue
-        if argument.startswith("--") and _is_sensitive_config_name(
-            argument[2:].partition("=")[0]
-        ):
-            return True
+        if argument.startswith("--"):
+            option, separator, inline_value = argument[2:].partition("=")
+            separated = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", option)
+            option_parts = tuple(
+                part
+                for part in re.split(r"[^a-z0-9]+", separated.casefold())
+                if part
+            )
+            if option_parts and option_parts[-1] in {"header", "headers"}:
+                header = (
+                    inline_value
+                    if separator
+                    else value[index + 1]
+                    if index + 1 < len(value)
+                    else None
+                )
+                if _header_contains_plaintext_auth(header):
+                    return True
+                continue
+            if _is_sensitive_config_name(option):
+                return True
     return False
 
 
@@ -219,7 +232,7 @@ def _preflight_auth_input(value: object) -> None:
 
 
 class _SanitizedConfigModel(BaseModel):
-    """Pydantic boundary that replaces input-retaining errors."""
+    """Core-schema boundary that replaces input-retaining errors."""
 
     @classmethod
     def _preflight_input(cls, value: object) -> None:
@@ -229,112 +242,32 @@ class _SanitizedConfigModel(BaseModel):
     def _validation_error_message(cls, value: object) -> str:
         raise NotImplementedError
 
-    def __init__(self, /, **data: Any):
-        model_type = type(self)
-        model_type._preflight_input(data)
-        validation_failed = False
-        try:
-            super().__init__(**data)
-        except ValidationError:
-            validation_failed = True
-        if validation_failed:
-            raise McpConfigError(model_type._validation_error_message(data))
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        schema = handler(source_type)
+        return core_schema.no_info_wrap_validator_function(
+            cls._validate_without_retaining_input, schema
+        )
 
     @classmethod
-    def model_validate(
-        cls,
-        obj: Any,
-        *,
-        strict: bool | None = None,
-        extra: ExtraValues | None = None,
-        from_attributes: bool | None = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        by_name: bool | None = None,
-    ) -> Self:
-        if isinstance(obj, cls):
-            return obj
-        cls._preflight_input(obj)
+    def _validate_without_retaining_input(
+        cls, value: object, handler: core_schema.ValidatorFunctionWrapHandler
+    ) -> object:
+        if isinstance(value, cls):
+            return value
+        cls._preflight_input(value)
         validation_failed = False
         try:
-            return super().model_validate(
-                obj,
-                strict=strict,
-                extra=extra,
-                from_attributes=from_attributes,
-                context=context,
-                by_alias=by_alias,
-                by_name=by_name,
-            )
+            validated = handler(value)
         except ValidationError:
             validation_failed = True
         if validation_failed:
-            raise McpConfigError(cls._validation_error_message(obj))
-        raise AssertionError("unreachable sanitized model validation state")
-
-    @classmethod
-    def model_validate_json(
-        cls,
-        json_data: str | bytes | bytearray,
-        *,
-        strict: bool | None = None,
-        extra: ExtraValues | None = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        by_name: bool | None = None,
-    ) -> Self:
-        parsed: object = None
-        validation_failed = False
-        try:
-            parsed = json.loads(json_data)
-        except (TypeError, ValueError):
-            validation_failed = True
-        if validation_failed:
-            raise McpConfigError(cls._validation_error_message(parsed))
-        cls._preflight_input(parsed)
-        validation_failed = False
-        try:
-            return super().model_validate_json(
-                json_data,
-                strict=strict,
-                extra=extra,
-                context=context,
-                by_alias=by_alias,
-                by_name=by_name,
-            )
-        except ValidationError:
-            validation_failed = True
-        if validation_failed:
-            raise McpConfigError(cls._validation_error_message(parsed))
-        raise AssertionError("unreachable sanitized JSON validation state")
-
-    @classmethod
-    def model_validate_strings(
-        cls,
-        obj: Any,
-        *,
-        strict: bool | None = None,
-        extra: ExtraValues | None = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        by_name: bool | None = None,
-    ) -> Self:
-        cls._preflight_input(obj)
-        validation_failed = False
-        try:
-            return super().model_validate_strings(
-                obj,
-                strict=strict,
-                extra=extra,
-                context=context,
-                by_alias=by_alias,
-                by_name=by_name,
-            )
-        except ValidationError:
-            validation_failed = True
-        if validation_failed:
-            raise McpConfigError(cls._validation_error_message(obj))
-        raise AssertionError("unreachable sanitized strings validation state")
+            # Raise outside the except suite so the discarded Pydantic error is
+            # absent from both __context__ and __cause__.
+            raise McpConfigError(cls._validation_error_message(value))
+        return validated
 
 
 class McpAuthConfig(_SanitizedConfigModel):
@@ -482,82 +415,23 @@ def _sanitize_registry_servers(data: dict[str, Any]) -> dict[str, Any]:
 class _SanitizedRegistryConfigModel(BaseModel):
     """Outer config boundary that redacts server references before validation."""
 
-    def __init__(self, /, **data: Any):
-        super().__init__(**_sanitize_registry_servers(data))
-
     @classmethod
-    def model_validate(
-        cls,
-        obj: Any,
-        *,
-        strict: bool | None = None,
-        extra: ExtraValues | None = None,
-        from_attributes: bool | None = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        by_name: bool | None = None,
-    ) -> Self:
-        if isinstance(obj, cls):
-            return obj
-        sanitized = _sanitize_registry_servers(obj) if isinstance(obj, dict) else obj
-        return super().model_validate(
-            sanitized,
-            strict=strict,
-            extra=extra,
-            from_attributes=from_attributes,
-            context=context,
-            by_alias=by_alias,
-            by_name=by_name,
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        schema = handler(source_type)
+        return core_schema.no_info_wrap_validator_function(
+            cls._sanitize_registry_for_validation, schema
         )
 
     @classmethod
-    def model_validate_json(
-        cls,
-        json_data: str | bytes | bytearray,
-        *,
-        strict: bool | None = None,
-        extra: ExtraValues | None = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        by_name: bool | None = None,
-    ) -> Self:
-        parsed: object = None
-        parse_failed = False
-        try:
-            parsed = json.loads(json_data)
-        except (TypeError, ValueError):
-            parse_failed = True
-        if parse_failed:
-            raise McpConfigError("invalid configuration document")
-        return cls.model_validate(
-            parsed,
-            strict=strict,
-            extra=extra,
-            context=context,
-            by_alias=by_alias,
-            by_name=by_name,
-        )
-
-    @classmethod
-    def model_validate_strings(
-        cls,
-        obj: Any,
-        *,
-        strict: bool | None = None,
-        extra: ExtraValues | None = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        by_name: bool | None = None,
-    ) -> Self:
-        sanitized = _sanitize_registry_servers(obj) if isinstance(obj, dict) else obj
-        return super().model_validate_strings(
-            sanitized,
-            strict=strict,
-            extra=extra,
-            context=context,
-            by_alias=by_alias,
-            by_name=by_name,
-        )
+    def _sanitize_registry_for_validation(
+        cls, value: object, handler: core_schema.ValidatorFunctionWrapHandler
+    ) -> object:
+        if isinstance(value, cls):
+            return value
+        sanitized = _sanitize_registry_servers(value) if isinstance(value, dict) else value
+        return handler(sanitized)
 
 
 class ResolutionCategory(BaseModel):
