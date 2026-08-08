@@ -514,6 +514,64 @@ def load_global_config(global_config_path: Path | None = None) -> GlobalConfig:
     return GlobalConfig(**_load_yaml(g_path))
 
 
+def _load_project_config(
+    project: Path | None,
+) -> tuple[Path | None, ProjectConfig | None]:
+    project_root = project.resolve() if project is not None else find_project_root()
+    if project_root is None:
+        return None, None
+
+    p_file = project_root / PROJECT_CONFIG_NAME / "config.yaml"
+    p_data = _load_yaml(p_file)
+    if not p_data:
+        logger.debug("No project config found at %s", p_file)
+        return project_root, None
+
+    project_cfg = ProjectConfig(**p_data)
+    logger.info(
+        "Project context: %s (%s)",
+        project_cfg.context.name or project_root.name,
+        project_root,
+    )
+    return project_root, project_cfg
+
+
+def _effective_authority_is_subset(
+    candidate: EffectiveConfig, enforced: EffectiveConfig
+) -> bool:
+    """Compare resolved IDs and concrete bindings after project application."""
+
+    enforced_servers = {
+        server.id: server.model_dump() for server in enforced.mcp_servers
+    }
+    for server in candidate.mcp_servers:
+        if enforced_servers.get(server.id) != server.model_dump():
+            return False
+
+    # Skill names and winning global/project bindings require discovery. Import
+    # lazily to avoid the SkillManager -> EffectiveConfig module cycle.
+    from gearcore_hub.skill_manager import SkillManager
+
+    candidate_skills = SkillManager(candidate)
+    enforced_skills = SkillManager(enforced)
+    candidate_names = candidate_skills.visible_skill_names
+    enforced_names = enforced_skills.visible_skill_names
+    if not candidate_names.issubset(enforced_names):
+        return False
+    for name in candidate_names:
+        candidate_bundle = candidate_skills.skills.get(name)
+        enforced_bundle = enforced_skills.skills.get(name)
+        if candidate_bundle is None or enforced_bundle is None:
+            return False
+        if (
+            candidate_bundle.path != enforced_bundle.path
+            or candidate_bundle.is_project_local
+            != enforced_bundle.is_project_local
+        ):
+            return False
+    return True
+
+
 def load_config(
     project: Path | None = None,
     global_config_path: Path | None = None,
@@ -533,25 +591,6 @@ def load_config(
     # --- Global ---
     global_cfg = load_global_config(global_config_path)
 
-    # --- Project ---
-    project_root: Path | None = None
-    project_cfg: ProjectConfig | None = None
-
-    project_root = project.resolve() if project is not None else find_project_root()
-
-    if project_root is not None:
-        p_file = project_root / PROJECT_CONFIG_NAME / "config.yaml"
-        p_data = _load_yaml(p_file)
-        if p_data:
-            project_cfg = ProjectConfig(**p_data)
-            logger.info(
-                "Project context: %s (%s)",
-                project_cfg.context.name or project_root.name,
-                project_root,
-            )
-        else:
-            logger.debug("No project config found at %s", p_file)
-
     envelope_was_supplied = context_envelope is not None
     key_was_supplied = envelope_public_key is not None
     if envelope_was_supplied or key_was_supplied:
@@ -563,12 +602,18 @@ def load_config(
             verify_envelope_file,
         )
 
-        def diagnostic(code: str) -> EffectiveConfig:
+        def diagnostic(
+            code: str,
+            *,
+            profile_source: str = "invalid-envelope",
+            enforced_profile_name: str | None = None,
+        ) -> EffectiveConfig:
             return EffectiveConfig(
                 global_cfg,
-                project_cfg,
-                project_root,
-                profile_source="invalid-envelope",
+                None,
+                None,
+                profile_source=profile_source,
+                enforced_profile_name=enforced_profile_name,
                 diagnostic_code=code,
             )
 
@@ -596,6 +641,10 @@ def load_config(
         except EnvelopeValidationError:
             return diagnostic(INVALID_ENVELOPE_DIAGNOSTIC)
 
+        # The signature and issuer/profile constraints are known-valid before
+        # any cwd discovery or project YAML read/log occurs.
+        project_root, project_cfg = _load_project_config(project)
+
         enforced_profile = profiles.entries[verified.profile]
         selected_profile_name = profile_name or verified.profile
         selected_profile = profiles.entries.get(selected_profile_name)
@@ -616,15 +665,12 @@ def load_config(
             candidate_overlay=candidate_overlay,
             enforced_overlay=enforced_overlay,
         ):
-            return EffectiveConfig(
-                global_cfg,
-                project_cfg,
-                project_root,
+            return diagnostic(
+                ENVELOPE_EXPANSION_DIAGNOSTIC,
                 profile_source="envelope",
                 enforced_profile_name=verified.profile,
-                diagnostic_code=ENVELOPE_EXPANSION_DIAGNOSTIC,
             )
-        return EffectiveConfig(
+        candidate_effective = EffectiveConfig(
             global_cfg,
             project_cfg,
             project_root,
@@ -632,7 +678,26 @@ def load_config(
             profile_source="envelope",
             enforced_profile_name=verified.profile,
         )
+        if selected_profile_name != verified.profile:
+            enforced_effective = EffectiveConfig(
+                global_cfg,
+                project_cfg,
+                project_root,
+                profile_name=verified.profile,
+                profile_source="envelope",
+                enforced_profile_name=verified.profile,
+            )
+            if not _effective_authority_is_subset(
+                candidate_effective, enforced_effective
+            ):
+                return diagnostic(
+                    ENVELOPE_EXPANSION_DIAGNOSTIC,
+                    profile_source="envelope",
+                    enforced_profile_name=verified.profile,
+                )
+        return candidate_effective
 
+    project_root, project_cfg = _load_project_config(project)
     return EffectiveConfig(
         global_cfg, project_cfg, project_root, profile_name=profile_name
     )

@@ -199,7 +199,10 @@ def verify_envelope_file(
 def _capability_policy_is_subset(
     candidate: CapabilityList, enforced: CapabilityList
 ) -> bool:
-    if not set(candidate.protected).issuperset(enforced.protected):
+    # Protection changes alter which concrete global/project binding wins even
+    # when the visible capability ID is unchanged. Treat only exact protection
+    # parity as a subset; this is deliberately conservative.
+    if set(candidate.protected) != set(enforced.protected):
         return False
 
     candidate_denied = set(candidate.deny).difference(candidate.protected)

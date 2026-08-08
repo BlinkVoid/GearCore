@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import sys
 import time
@@ -569,6 +570,162 @@ def test_alternate_profile_cannot_regain_capabilities_removed_by_enforced_overla
     assert result.diagnostic_codes == ("envelope_authority_expansion",)
 
 
+@pytest.mark.parametrize("capability_kind", ["mcp_servers", "skills"])
+def test_include_none_envelope_profile_cannot_be_bypassed_by_project_capability(
+    tmp_path: Path, signing_material, capability_kind: str
+):
+    private_key, public_key_path = signing_material
+    global_skills = tmp_path / "global-skills"
+    global_skill = global_skills / "gateway-skill"
+    global_skill.mkdir(parents=True)
+    (global_skill / "SKILL.md").write_text("# gateway", encoding="utf-8")
+    worker_scope = {
+        "mcp_servers": {"include": []},
+        "skills": {"include": []},
+    }
+    alternate_scope = {
+        "mcp_servers": {"include": []},
+        "skills": {"include": []},
+    }
+    worker_scope[capability_kind] = {}
+    alternate_scope[capability_kind] = {"include": ["project-shell"]}
+    config_path = tmp_path / "actual-authority-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 3,
+                "registry": {
+                    "mcp_servers": [
+                        {"id": "gateway", "command": "/trusted/gateway"}
+                    ],
+                    "skills_dirs": [str(global_skills)],
+                },
+                "profiles": {
+                    "default": "operator",
+                    "entries": {
+                        "operator": {},
+                        "worker": {
+                            "constrained": True,
+                            "scope": worker_scope,
+                        },
+                        "alternate": {
+                            "constrained": True,
+                            "scope": alternate_scope,
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    project = tmp_path / "hostile-project"
+    project_config = project / ".gearcore" / "config.yaml"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "registry": {
+                    "mcp_servers": [
+                        {"id": "project-shell", "command": "/unsafe/shell"}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    local_skill = project / ".gearcore" / "skills" / "project-shell"
+    local_skill.mkdir(parents=True)
+    (local_skill / "SKILL.md").write_text("# unsafe shell", encoding="utf-8")
+    envelope_path, _ = _signed_envelope(tmp_path, private_key, profile="worker")
+
+    result = _load(
+        config_path,
+        envelope_path,
+        public_key_path,
+        profile="alternate",
+        project=project,
+    )
+
+    assert result.diagnostic_only is True
+    assert result.profile_source == "envelope"
+    assert result.enforced_profile_name == "worker"
+    assert result.mcp_servers == []
+    assert result.diagnostic_codes == ("envelope_authority_expansion",)
+
+
+def test_alternate_profile_cannot_introduce_new_protected_binding(
+    tmp_path: Path, signing_material
+):
+    private_key, public_key_path = signing_material
+    config_path = tmp_path / "extra-protection-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 3,
+                "registry": {
+                    "mcp_servers": [
+                        {"id": "gateway", "command": "/trusted/gateway"}
+                    ]
+                },
+                "profiles": {
+                    "default": "operator",
+                    "entries": {
+                        "operator": {},
+                        "worker": {
+                            "constrained": True,
+                            "scope": {
+                                "mcp_servers": {"include": ["gateway"]}
+                            },
+                        },
+                        "alternate": {
+                            "constrained": True,
+                            "scope": {
+                                "mcp_servers": {
+                                    "include": ["gateway"],
+                                    "protected": ["gateway"],
+                                }
+                            },
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    project = tmp_path / "binding-project"
+    project_config = project / ".gearcore" / "config.yaml"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "registry": {
+                    "mcp_servers": [
+                        {"id": "gateway", "command": "/project/gateway"}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    envelope_path, _ = _signed_envelope(tmp_path, private_key, profile="worker")
+
+    result = _load(
+        config_path,
+        envelope_path,
+        public_key_path,
+        profile="alternate",
+        project=project,
+    )
+
+    assert result.diagnostic_only is True
+    assert result.profile_source == "envelope"
+    assert result.enforced_profile_name == "worker"
+    assert result.mcp_servers == []
+    assert result.diagnostic_codes == ("envelope_authority_expansion",)
+
+
 @pytest.mark.parametrize(
     "identity_field",
     ["profile", "issuer", "launch_id", "execution_id", "task_id", "nonce"],
@@ -723,3 +880,103 @@ async def test_diagnostic_only_status_call_and_serve_are_fail_closed(
         "request_skill",
         "capability_diagnostic",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_document", ["valid", "malformed"])
+@pytest.mark.parametrize(
+    "explicit_input",
+    [
+        "envelope-missing",
+        "envelope-partial",
+        "envelope-blank",
+        "key-missing",
+        "key-partial",
+        "key-blank",
+    ],
+)
+async def test_invalid_explicit_envelope_never_reads_or_logs_project_context(
+    tmp_path: Path,
+    signing_material,
+    monkeypatch,
+    caplog,
+    project_document: str,
+    explicit_input: str,
+):
+    private_key, public_key_path = signing_material
+    project = tmp_path / f"secret-project-root-{project_document}-{explicit_input}"
+    project_config = project / ".gearcore" / "config.yaml"
+    project_config.parent.mkdir(parents=True)
+    secret_context = f"secret-context-{project_document}-{explicit_input}"
+    secret_payload = f"secret-parse-payload-{project_document}-{explicit_input}"
+    if project_document == "valid":
+        project_config.write_text(
+            yaml.safe_dump(
+                {"version": 2, "context": {"name": secret_context}}
+            ),
+            encoding="utf-8",
+        )
+    else:
+        project_config.write_text(
+            f"version: 2\ncontext:\n  name: {secret_context}\nbroken: [{secret_payload}\n",
+            encoding="utf-8",
+        )
+    broken_target = tmp_path / f"secret-broken-target-{explicit_input}"
+    local_skills = project / ".gearcore" / "skills"
+    local_skills.mkdir()
+    (local_skills / "broken-secret-skill").symlink_to(broken_target)
+
+    context_envelope: Path | str | None
+    envelope_public_key: Path | str | None = public_key_path
+    if explicit_input == "envelope-missing":
+        context_envelope = tmp_path / f"secret-missing-envelope-{project_document}"
+    elif explicit_input == "envelope-partial":
+        context_envelope = None
+    elif explicit_input == "envelope-blank":
+        context_envelope = "   "
+    else:
+        context_envelope, _ = _signed_envelope(tmp_path, private_key)
+        if explicit_input == "key-missing":
+            envelope_public_key = tmp_path / "secret-missing-key"
+        elif explicit_input == "key-partial":
+            envelope_public_key = None
+        else:
+            envelope_public_key = "   "
+
+    @contextlib.asynccontextmanager
+    async def fake_stdio_server():
+        yield object(), object()
+
+    async def fake_server_run(*_args, **_kwargs):
+        return None
+
+    with caplog.at_level("DEBUG"):
+        config = load_config(
+            project=project,
+            global_config_path=_global_config(tmp_path),
+            context_envelope=context_envelope,
+            envelope_public_key=envelope_public_key,
+            now=NOW,
+        )
+        hub = GearCoreHub(config)
+        monkeypatch.setattr("gearcore_hub.main.stdio_server", fake_stdio_server)
+        monkeypatch.setattr(hub.server, "run", fake_server_run)
+        await hub.run()
+
+    logs = caplog.text
+    assert config.diagnostic_only is True
+    assert config.project_root is None
+    assert config.project_cfg is None
+    assert "GearCore ready (context: diagnostic-only)" in logs
+    for secret in (
+        str(project),
+        secret_context,
+        secret_payload,
+        str(broken_target),
+        "broken-secret-skill",
+        str(context_envelope),
+        str(envelope_public_key),
+    ):
+        if not secret.strip():
+            continue
+        assert secret not in logs

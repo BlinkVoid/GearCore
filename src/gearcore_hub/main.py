@@ -223,7 +223,12 @@ class GearCoreHub:
 
     async def run(self):
         await self._start_backends()
-        logger.info("GearCore ready (context: %s)", self.config.context_name)
+        context_name = (
+            "diagnostic-only"
+            if self.config.diagnostic_only
+            else self.config.context_name
+        )
+        logger.info("GearCore ready (context: %s)", context_name)
 
         try:
             async with stdio_server() as (read_stream, write_stream):
