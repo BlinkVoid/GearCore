@@ -654,6 +654,87 @@ def test_include_none_envelope_profile_cannot_be_bypassed_by_project_capability(
     assert result.diagnostic_codes == ("envelope_authority_expansion",)
 
 
+def test_alternate_skill_ceiling_survives_late_bundle_creation_and_refresh(
+    tmp_path: Path, signing_material
+):
+    private_key, public_key_path = signing_material
+    global_skills = tmp_path / "global-skills"
+    trusted_global = global_skills / "gateway-skill"
+    trusted_global.mkdir(parents=True)
+    (trusted_global / "SKILL.md").write_text("# trusted gateway", encoding="utf-8")
+    config_path = tmp_path / "late-skill-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 3,
+                "registry": {"skills_dirs": [str(global_skills)]},
+                "profiles": {
+                    "default": "operator",
+                    "entries": {
+                        "operator": {},
+                        "worker": {"constrained": True},
+                        "alternate": {
+                            "constrained": True,
+                            "scope": {
+                                "skills": {
+                                    "include": ["gateway-skill", "project-shell"]
+                                }
+                            },
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    project = tmp_path / "late-skill-project"
+    project_config = project / ".gearcore" / "config.yaml"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text("version: 2\n", encoding="utf-8")
+    envelope_path, _ = _signed_envelope(tmp_path, private_key, profile="worker")
+
+    result = _load(
+        config_path,
+        envelope_path,
+        public_key_path,
+        profile="alternate",
+        project=project,
+    )
+    assert result.diagnostic_only is False
+    ceiling = result.enforced_skill_bindings
+    assert isinstance(ceiling, frozenset)
+    with pytest.raises(AttributeError):
+        ceiling.add("mutable")
+
+    local_skills = project / ".gearcore" / "skills"
+    late_shell = local_skills / "project-shell"
+    late_shell.mkdir(parents=True)
+    (late_shell / "SKILL.md").write_text("# unsafe shell", encoding="utf-8")
+    late_collision = local_skills / "gateway-skill"
+    late_collision.mkdir()
+    (late_collision / "SKILL.md").write_text(
+        "# untrusted replacement", encoding="utf-8"
+    )
+
+    manager = SkillManager(result)
+    for _ in range(2):
+        assert manager.visible_skill_names == {"gateway-skill"}
+        assert manager.get_skill("project-shell") is None
+        gateway = manager.get_skill("gateway-skill")
+        assert gateway is not None
+        assert gateway.path == trusted_global
+        assert gateway.is_project_local is False
+        manager.refresh()
+
+    fresh_manager = SkillManager(result)
+    assert fresh_manager.visible_skill_names == {"gateway-skill"}
+    assert fresh_manager.get_skill("project-shell") is None
+    fresh_gateway = fresh_manager.get_skill("gateway-skill")
+    assert fresh_gateway is not None
+    assert fresh_gateway.path == trusted_global
+    assert fresh_gateway.is_project_local is False
+
+
 def test_alternate_profile_cannot_introduce_new_protected_binding(
     tmp_path: Path, signing_material
 ):

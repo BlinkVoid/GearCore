@@ -116,6 +116,65 @@ profiles:
             assert value not in output
 
 
+@pytest.mark.parametrize(
+    "launch_args",
+    [
+        ["--context-envelope", ""],
+        ["--context-envelope", "", "--envelope-public-key", ""],
+        [
+            "--context-envelope",
+            "missing-envelope",
+            "--envelope-public-key",
+            "missing-key",
+        ],
+    ],
+)
+def test_invalid_envelope_is_rejected_before_explicit_project_resolution(
+    tmp_path, monkeypatch, capsys, launch_args
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """\
+version: 3
+profiles:
+  default: operator
+  entries:
+    operator: {}
+    hive-worker:
+      constrained: true
+""",
+        encoding="utf-8",
+    )
+    guarded_project = Path("secret-pathological-project")
+    original_resolve = Path.resolve
+
+    def guarded_resolve(path, *args, **kwargs):
+        if path == guarded_project:
+            raise AssertionError("explicit project resolved before envelope validation")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", guarded_resolve)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gearcore",
+            "--config",
+            str(config_path),
+            "--project",
+            str(guarded_project),
+            *launch_args,
+            "status",
+        ],
+    )
+
+    cli_main()
+
+    output = capsys.readouterr().out
+    assert "invalid_launch_envelope" in output
+    assert "secret-pathological-project" not in output
+
+
 def test_status_prints_vendor_manifest(capsys):
     manifest = MagicMock()
     manifest.vendored_commit = "abcdef1234567890"

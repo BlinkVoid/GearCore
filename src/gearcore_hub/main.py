@@ -611,7 +611,7 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Verbose logging enabled")
 
-    project_path = Path(args.project).resolve() if args.project else None
+    project_path = Path(args.project) if args.project is not None else None
     config = load_config(
         project=project_path,
         global_config_path=Path(args.config).resolve() if args.config else None,

@@ -161,6 +161,11 @@ class SkillManager:
             )
             return
 
+        if not self.config.skill_binding_is_allowed(
+            manifest.name, skill_path, is_project_local
+        ):
+            return
+
         try:
             instructions = instructions_file.read_text(encoding="utf-8")
         except Exception as exc:

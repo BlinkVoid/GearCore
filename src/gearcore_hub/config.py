@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -156,6 +157,15 @@ class ProjectConfig(BaseModel):
         return [McpServerConfig(**s) for s in raw]
 
 
+@dataclass(frozen=True, slots=True)
+class SkillBindingCeiling:
+    """An immutable skill name-to-source binding enforced after launch."""
+
+    name: str
+    path: Path
+    is_project_local: bool
+
+
 class EffectiveConfig:
     """
     Merged view produced by the loader.  Consumers should use this only —
@@ -171,6 +181,7 @@ class EffectiveConfig:
         profile_name: str | None = None,
         profile_source: str = "default",
         enforced_profile_name: str | None = None,
+        enforced_skill_bindings: frozenset[SkillBindingCeiling] | None = None,
         diagnostic_code: str | None = None,
     ):
         self.global_cfg = global_cfg
@@ -181,6 +192,7 @@ class EffectiveConfig:
         self._runtime_diagnostic_codes: set[str] = set()
         self._profile_source = profile_source
         self._enforced_profile_name = enforced_profile_name
+        self._enforced_skill_bindings = enforced_skill_bindings
         self._diagnostic_only = diagnostic_code is not None
         self._project_profile: ProfileConfig | None = None
         self._project_rules: dict[
@@ -258,6 +270,10 @@ class EffectiveConfig:
     @property
     def diagnostic_only(self) -> bool:
         return self._diagnostic_only
+
+    @property
+    def enforced_skill_bindings(self) -> frozenset[SkillBindingCeiling] | None:
+        return self._enforced_skill_bindings
 
     @property
     def profile(self) -> ProfileConfig:
@@ -429,13 +445,21 @@ class EffectiveConfig:
     def protected_skill_names(self) -> tuple[str, ...]:
         return self.profile.scope.skills.protected
 
+    def skill_binding_is_allowed(
+        self, name: str, path: Path, is_project_local: bool
+    ) -> bool:
+        ceiling = self.enforced_skill_bindings
+        if ceiling is None:
+            return True
+        return SkillBindingCeiling(name, path.resolve(), is_project_local) in ceiling
+
     def resolve_skill_capabilities(
         self,
         global_skills: tuple[str, ...],
         project_skills: tuple[str, ...],
     ) -> ResolvedCapabilities:
         project_include, project_deny = self._project_capability_rules("skills")
-        return resolve_capabilities(
+        resolved = resolve_capabilities(
             global_skills,
             self.profile.scope.skills,
             project_capabilities=self._filter_project_capabilities(
@@ -447,6 +471,18 @@ class EffectiveConfig:
             project_include=project_include,
             project_deny=project_deny,
             project_override_attempts=project_skills,
+        )
+        ceiling = self.enforced_skill_bindings
+        if ceiling is None:
+            return resolved
+        allowed_names = {binding.name for binding in ceiling}
+        return ResolvedCapabilities(
+            active=tuple(
+                name for name in resolved.active if name in allowed_names
+            ),
+            denied=resolved.denied,
+            protected=resolved.protected,
+            diagnostics=resolved.diagnostics,
         )
 
     # --- Disclosure ---
@@ -536,17 +572,17 @@ def _load_project_config(
     return project_root, project_cfg
 
 
-def _effective_authority_is_subset(
+def _approved_skill_binding_ceiling(
     candidate: EffectiveConfig, enforced: EffectiveConfig
-) -> bool:
-    """Compare resolved IDs and concrete bindings after project application."""
+) -> frozenset[SkillBindingCeiling] | None:
+    """Approve resolved authority and return its persistent skill ceiling."""
 
     enforced_servers = {
         server.id: server.model_dump() for server in enforced.mcp_servers
     }
     for server in candidate.mcp_servers:
         if enforced_servers.get(server.id) != server.model_dump():
-            return False
+            return None
 
     # Skill names and winning global/project bindings require discovery. Import
     # lazily to avoid the SkillManager -> EffectiveConfig module cycle.
@@ -557,19 +593,26 @@ def _effective_authority_is_subset(
     candidate_names = candidate_skills.visible_skill_names
     enforced_names = enforced_skills.visible_skill_names
     if not candidate_names.issubset(enforced_names):
-        return False
+        return None
     for name in candidate_names:
         candidate_bundle = candidate_skills.skills.get(name)
         enforced_bundle = enforced_skills.skills.get(name)
         if candidate_bundle is None or enforced_bundle is None:
-            return False
+            return None
         if (
-            candidate_bundle.path != enforced_bundle.path
+            candidate_bundle.path.resolve() != enforced_bundle.path.resolve()
             or candidate_bundle.is_project_local
             != enforced_bundle.is_project_local
         ):
-            return False
-    return True
+            return None
+    return frozenset(
+        SkillBindingCeiling(
+            name=name,
+            path=enforced_skills.skills[name].path.resolve(),
+            is_project_local=enforced_skills.skills[name].is_project_local,
+        )
+        for name in enforced_names
+    )
 
 
 def load_config(
@@ -687,14 +730,24 @@ def load_config(
                 profile_source="envelope",
                 enforced_profile_name=verified.profile,
             )
-            if not _effective_authority_is_subset(
+            skill_ceiling = _approved_skill_binding_ceiling(
                 candidate_effective, enforced_effective
-            ):
+            )
+            if skill_ceiling is None:
                 return diagnostic(
                     ENVELOPE_EXPANSION_DIAGNOSTIC,
                     profile_source="envelope",
                     enforced_profile_name=verified.profile,
                 )
+            return EffectiveConfig(
+                global_cfg,
+                project_cfg,
+                project_root,
+                profile_name=selected_profile_name,
+                profile_source="envelope",
+                enforced_profile_name=verified.profile,
+                enforced_skill_bindings=skill_ceiling,
+            )
         return candidate_effective
 
     project_root, project_cfg = _load_project_config(project)
