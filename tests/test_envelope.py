@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from mcp.types import ListToolsRequest
 from gearcore_hub.config import load_config
 from gearcore_hub.envelope import canonical_envelope_bytes
 from gearcore_hub.main import GearCoreHub, cmd_call, cmd_status
+from gearcore_hub.main import main as cli_main
 
 NOW = 1_800_000_000
 ISSUER = "test-worker-spawner"
@@ -265,6 +268,55 @@ def test_empty_config_api_envelope_inputs_are_still_explicit(
     assert result.enforced_profile_name is None
     assert result.mcp_servers == []
     assert result.diagnostic_codes == ("invalid_launch_envelope",)
+
+
+@pytest.mark.parametrize("blank_target", ["envelope", "public-key", "both"])
+def test_whitespace_only_cli_values_are_rejected_even_when_named_files_are_valid(
+    tmp_path: Path, signing_material, monkeypatch, capsys, blank_target: str
+):
+    private_key, public_key_path = signing_material
+    current_time = int(time.time())
+    envelope_path, _ = _signed_envelope(
+        tmp_path,
+        private_key,
+        issued_at=current_time - 10,
+        expires_at=current_time + 60,
+    )
+    envelope_argument = str(envelope_path)
+    key_argument = str(public_key_path)
+
+    if blank_target in ("envelope", "both"):
+        whitespace_envelope = tmp_path / " "
+        envelope_path.rename(whitespace_envelope)
+        envelope_argument = " "
+    if blank_target in ("public-key", "both"):
+        whitespace_key = tmp_path / "  "
+        public_key_path.rename(whitespace_key)
+        key_argument = "  "
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gearcore",
+            "--config",
+            str(_global_config(tmp_path)),
+            "--context-envelope",
+            envelope_argument,
+            "--envelope-public-key",
+            key_argument,
+            "status",
+        ],
+    )
+
+    cli_main()
+
+    output = capsys.readouterr().out
+    assert "invalid_launch_envelope" in output
+    assert "Profile: hive-worker" not in output
+    assert "launch-safe" not in output
+    assert "nonce-safe" not in output
 
 
 def test_valid_envelope_rejects_requested_authority_expansion(

@@ -562,6 +562,15 @@ def load_config(
                 diagnostic_code=code,
             )
 
+        envelope_is_blank = (
+            isinstance(context_envelope, str) and not context_envelope.strip()
+        )
+        key_is_blank = (
+            isinstance(envelope_public_key, str)
+            and not envelope_public_key.strip()
+        )
+        if envelope_is_blank or key_is_blank:
+            return diagnostic(INVALID_ENVELOPE_DIAGNOSTIC)
         if context_envelope is None or envelope_public_key is None:
             return diagnostic(INVALID_ENVELOPE_DIAGNOSTIC)
         profiles = global_cfg.profiles

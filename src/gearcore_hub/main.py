@@ -572,6 +572,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_launch_path(value: str | None) -> Path | str | None:
+    """Resolve a nonblank launch path while preserving explicit blank input."""
+
+    if value is None or not value.strip():
+        return value
+    return Path(value).resolve()
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -590,16 +598,8 @@ def main():
         project=project_path,
         global_config_path=Path(args.config).resolve() if args.config else None,
         profile_name=args.profile,
-        context_envelope=(
-            Path(args.context_envelope).resolve()
-            if args.context_envelope is not None
-            else None
-        ),
-        envelope_public_key=(
-            Path(args.envelope_public_key).resolve()
-            if args.envelope_public_key is not None
-            else None
-        ),
+        context_envelope=_resolve_launch_path(args.context_envelope),
+        envelope_public_key=_resolve_launch_path(args.envelope_public_key),
     )
 
     command = args.command or "serve"
