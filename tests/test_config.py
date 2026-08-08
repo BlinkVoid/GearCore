@@ -92,6 +92,7 @@ class TestEffectiveConfig:
         effective = EffectiveConfig(global_cfg, project_cfg, Path("/tmp/fake"))
         assert len(effective.mcp_servers) == 1
         assert effective.mcp_servers[0].id == "fs"
+        assert effective.profile_name == "default"
         assert effective.context_name == "global"  # no project name set
 
     def test_project_local_skills_dir_appended(self):
@@ -177,18 +178,69 @@ class TestEffectiveConfig:
 
 
 class TestLoadConfig:
+    def test_v3_default_profile_selected_without_project(self, monkeypatch, tmp_path):
+        config_file = tmp_path / "global.yaml"
+        config_file.write_text(
+            "version: 3\n"
+            "profiles:\n"
+            "  default: operator\n"
+            "  entries:\n"
+            "    operator: {}\n"
+            "    hive-worker:\n"
+            "      constrained: true\n"
+        )
+        cwd = tmp_path / "outside-project"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+
+        cfg = load_config(global_config_path=config_file)
+
+        assert cfg.project_root is None
+        assert cfg.profile_name == "operator"
+        assert cfg.profile_source == "default"
+
+    def test_v3_default_profile_selected_in_nested_v2_project(
+        self, monkeypatch, tmp_path
+    ):
+        config_file = tmp_path / "global.yaml"
+        config_file.write_text(
+            "version: 3\n"
+            "profiles:\n"
+            "  default: operator\n"
+            "  entries:\n"
+            "    operator: {}\n"
+            "    hive-worker:\n"
+            "      constrained: true\n"
+        )
+        project = tmp_path / "project"
+        project_config_dir = project / ".gearcore"
+        project_config_dir.mkdir(parents=True)
+        (project_config_dir / "config.yaml").write_text(
+            "version: 2\ncontext:\n  name: hive-worker\n"
+        )
+        nested = project / "src" / "nested"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        cfg = load_config(global_config_path=config_file)
+
+        assert cfg.project_root == project
+        assert cfg.context_name == "hive-worker"
+        assert cfg.profile_name == "operator"
+        assert cfg.profile_source == "default"
+
     def test_loads_from_explicit_global_path(self, tmp_path: Path):
         config_file = tmp_path / "config.yaml"
         config_file.write_text(
             "version: 2\nregistry:\n  mcp_servers:\n    - id: test\n      type: stdio\n      command: echo\n"
         )
-        cfg = load_config(global_config_path=config_file)
+        cfg = load_config(project=tmp_path, global_config_path=config_file)
         assert cfg.context_name == "global"
         assert len(cfg.mcp_servers) == 1
 
     def test_missing_config_is_graceful(self, tmp_path: Path):
         config_file = tmp_path / "nonexistent.yaml"
-        cfg = load_config(global_config_path=config_file)
+        cfg = load_config(project=tmp_path, global_config_path=config_file)
         assert cfg.context_name == "global"
         assert cfg.mcp_servers == []
 

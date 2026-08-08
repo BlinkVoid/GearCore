@@ -12,11 +12,18 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from gearcore_hub.profiles import (
+    DisclosureConfig as ProfileDisclosureConfig,
+)
+from gearcore_hub.profiles import (
+    ProfileConfig,
+    ProfilesConfig,
+)
 from gearcore_hub.vendor import bundled_superpowers_dir
 
 logger = logging.getLogger("gearcore.config")
@@ -49,6 +56,8 @@ class ResolutionConfig(BaseModel):
 
 
 class DisclosureConfig(BaseModel):
+    """Legacy version-2 disclosure configuration."""
+
     strategy: str = "manual"  # manual | semantic
     activation_threshold: float = 0.85
     core_skills: list[str] = Field(default_factory=list)
@@ -71,10 +80,19 @@ def _default_skills_dirs() -> list[Path]:
 class GlobalConfig(BaseModel):
     """Schema for ~/.config/gearcore/config.yaml"""
 
-    version: int = 2
+    version: Literal[2, 3] = 2
     registry: dict[str, Any] = Field(default_factory=dict)
     disclosure: DisclosureConfig = Field(default_factory=DisclosureConfig)
     resolution: ResolutionConfig = Field(default_factory=ResolutionConfig)
+    profiles: ProfilesConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_profiles_version(self) -> Self:
+        if self.version == 3 and self.profiles is None:
+            raise ValueError("profiles are required for configuration version 3")
+        if self.version == 2 and self.profiles is not None:
+            raise ValueError("profiles require configuration version 3")
+        return self
 
     @property
     def mcp_servers(self) -> list[McpServerConfig]:
@@ -106,7 +124,7 @@ class ProjectContext(BaseModel):
 class ProjectConfig(BaseModel):
     """Schema for <project>/.gearcore/config.yaml"""
 
-    version: int = 2
+    version: Literal[2, 3] = 2
     context: ProjectContext = Field(default_factory=ProjectContext)
     scope: ProjectScope = Field(default_factory=ProjectScope)
     registry: dict[str, Any] = Field(default_factory=dict)  # project-local defs
@@ -143,6 +161,30 @@ class EffectiveConfig:
         self.global_cfg = global_cfg
         self.project_cfg = project_cfg
         self.project_root = project_root
+        self._profile_source = "default"
+        if global_cfg.version == 2:
+            self._profile_name = "default"
+            self._profile = ProfileConfig.model_validate(
+                {"disclosure": global_cfg.disclosure.model_dump()}
+            )
+        else:
+            profiles = global_cfg.profiles
+            if profiles is None:  # GlobalConfig validation makes this unreachable.
+                raise ValueError("profiles are required for configuration version 3")
+            self._profile_name = profiles.default
+            self._profile = profiles.entries[self._profile_name].model_copy(deep=True)
+
+    @property
+    def profile_name(self) -> str:
+        return self._profile_name
+
+    @property
+    def profile_source(self) -> str:
+        return self._profile_source
+
+    @property
+    def profile(self) -> ProfileConfig:
+        return self._profile
 
     # --- MCP servers ---
 
@@ -189,10 +231,12 @@ class EffectiveConfig:
     # --- Disclosure ---
 
     @property
-    def disclosure(self) -> DisclosureConfig:
-        if self.project_cfg and self.project_cfg.disclosure:
-            return self.project_cfg.disclosure
-        return self.global_cfg.disclosure
+    def disclosure(self) -> DisclosureConfig | ProfileDisclosureConfig:
+        if self.global_cfg.version == 2:
+            if self.project_cfg and self.project_cfg.disclosure:
+                return self.project_cfg.disclosure
+            return self.global_cfg.disclosure
+        return self.profile.disclosure
 
     # --- Resolution ---
 
