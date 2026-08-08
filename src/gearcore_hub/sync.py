@@ -2,10 +2,12 @@
 Sync command — install the GearCore self-skill into AI CLI tool discovery paths.
 
 Canonical location:  ~/.config/agents/skills/gearcore/  (owns the actual files)
-Symlinked from:      ~/.claude/skills/gearcore/
+Possible links:      ~/.claude/skills/gearcore/
                      ~/.codex/skills/gearcore/
                      ~/.kimi/skills/gearcore/
                      ~/.config/opencode/skills/gearcore/
+
+Only clients selected explicitly or detected on PATH receive links.
 
 Kimi already scans ~/.config/agents/skills/ as its highest-priority user path,
 so no extra step is needed for kimi beyond the canonical install.
@@ -21,6 +23,10 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from gearcore_hub.config import EffectiveConfig
 
 logger = logging.getLogger("gearcore.sync")
 
@@ -46,15 +52,12 @@ SELF_SKILL_SOURCE = Path(__file__).parent / "self_skill"
 # ---------------------------------------------------------------------------
 
 
-def embed_level0_section(
-    skill_md: Path, global_config_path: Path | None = None
-) -> bool:
+def embed_level0_section(skill_md: Path, config: EffectiveConfig) -> bool:
     """
     Replace the LEVEL0 marker in *skill_md* with the default-skills section
-    generated from the global config. Global scope only — the canonical
-    self-skill is shared by every project. Returns True if the file changed.
+    generated from the already-selected effective capability profile. Returns
+    True if the file changed.
     """
-    from gearcore_hub.config import EffectiveConfig, load_global_config
     from gearcore_hub.render import (
         LEVEL0_MARKER,
         apply_level0_marker,
@@ -66,10 +69,14 @@ def embed_level0_section(
     if LEVEL0_MARKER not in content:
         return False
 
-    global_cfg = load_global_config(global_config_path)
-    effective = EffectiveConfig(global_cfg, None, None)
-    sm = SkillManager(effective)
-    section = render_level0_section(global_cfg.disclosure.core_skills, sm.skills)
+    sm = SkillManager(config)
+    visible_names = sm.visible_skill_names
+    visible_core_skills = (
+        name
+        for name in config.disclosure.core_skills
+        if name in visible_names
+    )
+    section = render_level0_section(visible_core_skills, sm.skills)
 
     new_content = apply_level0_marker(content, section)
     if new_content == content:
@@ -97,7 +104,7 @@ def _detect_installed_tools() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _install_canonical(dry_run: bool = False) -> bool:
+def _install_canonical(config: EffectiveConfig, dry_run: bool = False) -> bool:
     """
     Copy self-skill bundle to canonical location.
     Returns True if an action was taken (or would be taken in dry_run).
@@ -120,7 +127,7 @@ def _install_canonical(dry_run: bool = False) -> bool:
         CANONICAL_DIR.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(SELF_SKILL_SOURCE, CANONICAL_DIR)
 
-        if embed_level0_section(CANONICAL_DIR / "SKILL.md"):
+        if embed_level0_section(CANONICAL_DIR / "SKILL.md", config):
             logger.info("Embedded level-0 default-skills section into canonical SKILL.md")
 
     return True
@@ -190,6 +197,7 @@ def _remove_canonical(dry_run: bool = False) -> bool:
 
 
 def sync(
+    config: EffectiveConfig,
     tools: list[str] | None = None,
     dry_run: bool = False,
     remove: bool = False,
@@ -198,6 +206,7 @@ def sync(
     Install or remove the GearCore self-skill on AI CLI tools.
 
     Args:
+        config:  The single effective configuration selected by the CLI.
         tools:   Explicit list of tool names to target. None = auto-detect.
         dry_run: Print what would happen without making changes.
         remove:  Unlink instead of install.
@@ -232,7 +241,7 @@ def sync(
     results = {}
 
     # 1. Install canonical
-    ok = _install_canonical(dry_run=dry_run)
+    ok = _install_canonical(config, dry_run=dry_run)
     results["canonical"] = f"{prefix}installed" if ok else "error (see logs)"
 
     # 2. Symlink each tool

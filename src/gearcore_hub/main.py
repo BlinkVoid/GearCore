@@ -20,7 +20,8 @@ Usage:
   gearcore [--project <path>] request-skill <name>
   gearcore call <server_id> <tool> ['<json_args>']
   gearcore [--project <path>] [serve]
-  gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
+  gearcore add-mcp --id <id> --type stdio --command <cmd> [options] [--args ...]
+    (--args is the final GearCore option; its remainder is child argv)
   gearcore add-skill <path> [--scope global|project] [--symlink]
   gearcore add-cli <program> [--scope global|project]
   gearcore profile-set <name> [capability options]
@@ -38,8 +39,9 @@ import json
 import logging
 import re
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import Any, TypeVar, overload
 
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
@@ -67,6 +69,107 @@ logging.basicConfig(
 logger = logging.getLogger("gearcore")
 
 AUTHENTICATED_BACKEND_FAILURE_MESSAGE = "authenticated backend request failed"
+_NamespaceT = TypeVar("_NamespaceT")
+_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "--project",
+        "-p",
+        "--config",
+        "--profile",
+        "--context-envelope",
+        "--envelope-public-key",
+    }
+)
+_GLOBAL_FLAGS = frozenset({"-h", "--help", "-v", "--verbose"})
+
+
+def _normalize_attached_child_delimiter(arguments: list[str]) -> list[str]:
+    """Expand add-mcp's attached delimiter into the REMAINDER grammar.
+
+    Argparse accepts the attached value but, unlike a detached REMAINDER
+    option, continues interpreting later tokens as CLI options. Canonicalizing
+    only the first delimiter token makes both spellings obey the same final-
+    option contract. Tokens after a detached delimiter are never inspected.
+    """
+
+    command_index: int | None = None
+    index = 0
+    while index < len(arguments):
+        value = arguments[index]
+        option_name = value.split("=", 1)[0]
+        if value in _GLOBAL_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if option_name in _GLOBAL_OPTIONS_WITH_VALUE or value in _GLOBAL_FLAGS:
+            index += 1
+            continue
+        if value == "add-mcp":
+            command_index = index
+        break
+    if command_index is None:
+        return arguments
+
+    for index in range(command_index + 1, len(arguments)):
+        value = arguments[index]
+        if value == "--args":
+            return arguments
+        if value.startswith("--args="):
+            return [
+                *arguments[:index],
+                "--args",
+                value.removeprefix("--args="),
+                *arguments[index + 1 :],
+            ]
+    return arguments
+
+
+class _GearCoreArgumentParser(argparse.ArgumentParser):
+    """Preserve a literal ``--`` inside add-mcp's REMAINDER.
+
+    Python's subparser implementation returns ``--`` and everything after it
+    as extras even when an optional action uses ``argparse.REMAINDER``. The
+    grammar is still unambiguous once add-mcp's ``--args`` has fired, so append
+    only that exact extras suffix. No token is rewritten or reinterpreted.
+    """
+
+    @overload
+    def parse_args(
+        self,
+        args: Sequence[str] | None = ...,
+        namespace: None = ...,
+    ) -> argparse.Namespace: ...
+
+    @overload
+    def parse_args(
+        self,
+        args: Sequence[str] | None,
+        namespace: _NamespaceT,
+    ) -> _NamespaceT: ...
+
+    @overload
+    def parse_args(self, *, namespace: _NamespaceT) -> _NamespaceT: ...
+
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: Any = None,
+    ) -> Any:
+        supplied = list(sys.argv[1:] if args is None else args)
+        parsed, extras = super().parse_known_args(
+            _normalize_attached_child_delimiter(supplied), namespace
+        )
+        child_arguments = getattr(parsed, "args", None)
+        if (
+            getattr(parsed, "command", None) == "add-mcp"
+            and isinstance(child_arguments, list)
+            and extras
+            and extras[0] == "--"
+        ):
+            child_arguments.extend(extras)
+            extras = []
+        if extras:
+            self.error(f"unrecognized arguments: {' '.join(extras)}")
+        return parsed
 
 
 _SAFE_STATUS_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -644,7 +747,7 @@ def cmd_call(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _GearCoreArgumentParser(
         prog="gearcore",
         description="GearCore — unified skill and MCP hub",
     )
@@ -717,7 +820,15 @@ def build_parser() -> argparse.ArgumentParser:
     # dest must not be "command": that would clobber the subparsers'
     # dest="command" and break dispatch (add-mcp would silently no-op).
     p_add_mcp.add_argument("--command", dest="mcp_command", default="")
-    p_add_mcp.add_argument("--args", nargs="*", default=[])
+    p_add_mcp.add_argument(
+        "--args",
+        nargs=argparse.REMAINDER,
+        default=None,
+        metavar="ARG",
+        help="Final GearCore option: every following token is child argv "
+        "verbatim. Put --env, --scope, --disabled, and all other GearCore "
+        "options before --args. Attached --args=VALUE starts argv with VALUE.",
+    )
     p_add_mcp.add_argument("--url", default="")
     p_add_mcp.add_argument("--env", nargs="*", metavar="KEY=VALUE", default=[])
     p_add_mcp.add_argument("--scope", default="global", choices=["global", "project"])
@@ -893,7 +1004,7 @@ def main():
                 id=args.id,
                 type=args.type,
                 command=args.mcp_command,
-                args=args.args,
+                args=args.args or [],
                 url=args.url,
                 env=env,
                 scope=args.scope,
@@ -956,6 +1067,7 @@ def main():
         from gearcore_hub.sync import sync
 
         results = sync(
+            config=config,
             tools=args.tool,
             dry_run=args.dry_run,
             remove=args.remove,

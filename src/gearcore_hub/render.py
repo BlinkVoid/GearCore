@@ -8,7 +8,7 @@ so the different surfaces cannot drift apart.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from gearcore_hub.skill_manager import SkillBundle
 
@@ -36,7 +36,7 @@ LEVEL0_MARKER = "<!-- GEARCORE:LEVEL0 -->"
 
 
 def render_level0_section(
-    core_skills: list[str], skills: Mapping[str, SkillBundle]
+    core_skills: Iterable[str], skills: Mapping[str, SkillBundle]
 ) -> str:
     """
     Markdown 'Default skills' section for the synced self-skill SKILL.md.

@@ -39,15 +39,177 @@ def test_add_mcp_command_flag_does_not_clobber_subcommand():
             "stdio",
             "--command",
             "uvx",
-            "--args",
-            "mcp-atlassian",
             "--env",
             "A=B",
+            "--args",
+            "mcp-atlassian",
         ]
     )
     assert args.command == "add-mcp"
     assert args.mcp_command == "uvx"
     assert args.args == ["mcp-atlassian"]
+    assert args.env == ["A=B"]
+
+
+def test_add_mcp_args_delimiter_preserves_every_following_token_verbatim():
+    args = build_parser().parse_args(
+        [
+            "add-mcp",
+            "--id",
+            "playwright",
+            "--command",
+            "npx",
+            "--env",
+            "MODE=safe",
+            "--disabled",
+            "--scope",
+            "project",
+            "--args",
+            "-y",
+            "@playwright/mcp",
+            "--help",
+            "--scope",
+            "global",
+            "--env",
+            "CHILD=value",
+            "--url=https://child.invalid",
+            "--unknown-child-flag",
+            "--args",
+            "--",
+        ]
+    )
+
+    assert args.args == [
+        "-y",
+        "@playwright/mcp",
+        "--help",
+        "--scope",
+        "global",
+        "--env",
+        "CHILD=value",
+        "--url=https://child.invalid",
+        "--unknown-child-flag",
+        "--args",
+        "--",
+    ]
+    assert args.env == ["MODE=safe"]
+    assert args.disabled is True
+    assert args.scope == "project"
+
+
+def test_add_mcp_help_before_delimiter_is_cli_help_but_after_is_child_argv(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(["add-mcp", "--help"])
+    assert exit_info.value.code == 0
+    assert "Final GearCore option" in capsys.readouterr().out
+
+    args = build_parser().parse_args(
+        ["add-mcp", "--id", "child", "--args", "--help"]
+    )
+    assert args.args == ["--help"]
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("delimiter", [["--args", "ok"], ["--args=ok"]])
+def test_add_mcp_unknown_option_before_delimiter_errors_with_original_token(
+    capsys, delimiter
+):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(
+            ["add-mcp", "--id", "child", "--unknown-before", *delimiter]
+        )
+
+    assert exit_info.value.code == 2
+    assert "--unknown-before" in capsys.readouterr().err
+
+
+def test_add_mcp_literal_separator_without_args_action_is_not_child_argv(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(
+            ["add-mcp", "--id", "child", "--", "--scope", "project"]
+        )
+
+    assert exit_info.value.code == 2
+    assert "--scope project" in capsys.readouterr().err
+
+
+def test_add_mcp_detached_empty_child_argument_is_preserved():
+    args = build_parser().parse_args(
+        ["add-mcp", "--id", "child", "--args", ""]
+    )
+
+    assert args.args == [""]
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--args=child", "after", "--help"], ["child", "after", "--help"]),
+        (["--args=--help", "--scope"], ["--help", "--scope"]),
+        (["--args=", "after"], ["", "after"]),
+    ],
+)
+def test_add_mcp_attached_delimiter_value_starts_verbatim_child_argv(
+    argv, expected
+):
+    args = build_parser().parse_args(["add-mcp", "--id", "child", *argv])
+
+    assert args.args == expected
+
+
+@pytest.mark.parametrize(
+    ("server_id", "child_args"),
+    [
+        (
+            "filesystem",
+            [
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                "/home/user/workspace",
+            ],
+        ),
+        ("playwright", ["-y", "@playwright/mcp"]),
+    ],
+)
+def test_readme_add_mcp_commands_preserve_dash_prefixed_child_arguments(
+    tmp_path, monkeypatch, capsys, server_id, child_args
+):
+    """The exact quick-start shape must reach registry.add_mcp unchanged."""
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("version: 2\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def recording_add_mcp(**kwargs):
+        captured.update(kwargs)
+        return config_path
+
+    monkeypatch.setattr("gearcore_hub.registry.add_mcp", recording_add_mcp)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gearcore",
+            "--config",
+            str(config_path),
+            "add-mcp",
+            "--id",
+            server_id,
+            "--type",
+            "stdio",
+            "--command",
+            "npx",
+            "--args",
+            *child_args,
+        ],
+    )
+
+    cli_main()
+
+    assert captured["id"] == server_id
+    assert captured["command"] == "npx"
+    assert captured["args"] == child_args
+    assert "Registered MCP server" in capsys.readouterr().out
 
 
 def test_profile_set_parser_accepts_repeatable_capability_options():
@@ -214,6 +376,41 @@ def test_launch_policy_flags_are_available_to_runtime_commands():
         assert args.profile == "hive-worker"
         assert args.context_envelope == "/safe/envelope.json"
         assert args.envelope_public_key == "/safe/public-key.json"
+
+
+def test_sync_receives_the_single_effective_config_from_main(
+    tmp_path, monkeypatch, capsys
+):
+    sentinel = object()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("gearcore_hub.main.load_config", lambda **_kwargs: sentinel)
+
+    def recording_sync(*, config, tools, dry_run, remove):
+        captured.update(
+            config=config,
+            tools=tools,
+            dry_run=dry_run,
+            remove=remove,
+        )
+        return {"canonical": "dry"}
+
+    monkeypatch.setattr("gearcore_hub.sync.sync", recording_sync)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gearcore", "--project", str(tmp_path), "sync", "--dry-run"],
+    )
+
+    cli_main()
+
+    assert captured == {
+        "config": sentinel,
+        "tools": None,
+        "dry_run": True,
+        "remove": False,
+    }
+    assert "canonical" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

@@ -5,9 +5,9 @@
 ## What This Is
 
 GearCore is a **unified skill + MCP hub** for AI CLI tools (Claude Code, Codex, Kimi, OpenCode).
-One registration (`gearcore add-mcp` / `add-skill`) propagates to every client via `gearcore sync`,
-which installs a self-skill into each tool's skill path. Tools stay hidden until the AI pulls them
-via `request-skill` — progressive disclosure keeps the context window lean.
+One registration (`gearcore add-mcp` / `add-skill`) can propagate via `gearcore sync` to explicitly
+selected or PATH-detected clients, which receive the self-skill in their discovery paths. Tools stay
+hidden until the AI pulls them via `request-skill` — progressive disclosure keeps the context lean.
 
 ## Architecture Decisions (and WHY)
 
@@ -18,12 +18,21 @@ via `request-skill` — progressive disclosure keeps the context window lean.
 - **Stateless per-call**: `gearcore call` starts the backend, invokes one tool, exits. No persistent
   hub process; OS process lifecycle = session lifecycle. Shared process management exists only in
   `serve` mode (`process_manager.py`).
-- **Layered config, narrow-only scoping**: built-in defaults → `~/.config/gearcore/config.yaml` →
-  `<project>/.gearcore/config.yaml`. Projects *narrow* global registrations via allowlists
-  (`scope.*.include`). The one exception: project-local definitions — skills in `.gearcore/skills/`
-  and MCP servers in project `registry.mcp_servers` — are always visible in that project, never
-  outside it, and a project MCP def overrides a global one with the same id (warning logged).
-  Preserve this invariant in `config.py`/`skill_manager.py`.
+- **Layered config has versioned semantics**: built-in defaults →
+  `~/.config/gearcore/config.yaml` → `<project>/.gearcore/config.yaml`. In a wholly v2 setup,
+  project allowlists narrow globals, project-local skills/MCPs are included, and a local MCP
+  shadows a same-ID global. Do not preserve that as a universal invariant. Under v3 the selected
+  global profile resolves first; v3 project entries can narrow with include/deny, denies apply to
+  local IDs, constrained/envelope launches impose a profile capability ceiling, and protected
+  globals survive v2/v3 project omissions, denies, and collisions. An envelope-approved alternate
+  also receives the enforced skill-binding ceiling.
+- **Profiles are not containment**: the default operator is for a human-started CLI; a launcher
+  must sign a constrained worker envelope. Profiles are policy/defense in depth. Authenticated MCP
+  servers plus launcher process/filesystem/network isolation form the hostile-process boundary.
+- **Credentials are reference-only**: YAML retains `credential_ref`, never a token. The store
+  accepts only safe current-user files. `SharedMCPServer` materializes the secret at start into a
+  private stdio child environment or ephemeral SSE/streamable-HTTP bearer header, without mutating
+  the parent environment or retaining temporary credential mappings.
 - **`add-mcp --scope project` has two modes**: default writes a project-local definition into
   `registry.mcp_servers`; `--allowlist` appends an existing global id to `scope.mcp_servers.include`.
   Without `--allowlist`, passing a global id creates a shadowing project-local def — almost never
@@ -42,13 +51,26 @@ via `request-skill` — progressive disclosure keeps the context window lean.
 - **argparse subparser `dest` clobbering** (commit f59d5f2): `add-mcp --command` reused a dest that
   clobbered subcommand dispatch. When adding subcommands/flags, check for dest collisions in
   `main.py`.
+- **`add-mcp --args` is a delimiter**: it uses `argparse.REMAINDER` and must be the final GearCore
+  option. Every following token is child argv verbatim, including known GearCore flags, `--help`,
+  repeated `--args`, and literal `--`; put `--env`, `--scope`, and other registry options first.
+  `_GearCoreArgumentParser` only compensates for Python subparsers returning a literal `--` suffix
+  as extras. It also canonicalizes argparse's attached `--args=VALUE` spelling so `VALUE` is the
+  first child argument and the following remainder cannot be rerouted as GearCore options;
+  `--args=` and detached `--args ""` both preserve an empty child argument. Parser default `None`
+  distinguishes an absent action from an explicitly empty remainder.
 - **Import discipline**: a premature `Mapping` import broke startup once (0e79b32). The CLI must
   start fast and clean — avoid heavy/unnecessary top-level imports; `main.py` is on the hot path
   for every AI tool invocation.
 - **Symlinks are the distribution mechanism**: sync copies the self-skill to
   `~/.config/agents/skills/gearcore/` (canonical) and symlinks from `~/.claude/skills/`,
   `~/.codex/skills/`, `~/.kimi/skills/`, `~/.config/opencode/skills/`. Test sync changes against
-  real symlink behavior, not just file copies.
+  real symlink behavior, not just file copies. Only explicitly selected or PATH-detected clients
+  are linked; do not describe sync as unconditionally linking all four.
+- **Sync consumes the existing `EffectiveConfig`**: never reload global configuration during
+  self-skill rendering. Embed level-0 instructions from the effective selected profile's
+  `disclosure.core_skills`; this is what keeps v3 operator/worker selection and Task7's
+  single-config boundary consistent while preserving v2 behavior.
 - **Vendored superpowers skills** live under `src/gearcore_hub/third_party/` (f0a7a1c). Don't edit
   vendored content in place; re-vendor via `vendor.py`.
 
@@ -60,6 +82,6 @@ via `request-skill` — progressive disclosure keeps the context window lean.
 - Config and skill formats are spec'd in CONFIG_SCHEMA.md / SKILL_SCHEMA.md — change schema and
   docs together. Architecture-level changes belong in ARCHITECTURE.md and a spec under `docs/`.
 - CLI example commands in docs historically drifted from reality (581aa8e) — when renaming
-  commands/flags, grep docs and README for stale examples. (Note: README quick-start shows the
-  historical `geracore` typo in a few snippets; real binary is `gearcore`.)
+  commands/flags, grep docs and README for stale examples and execute the documented shape in a
+  temporary configuration.
 - Commit style: conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).

@@ -1,7 +1,7 @@
 {
   "name": "gearcore",
-  "version": "2.0.0",
-  "description": "Unified skill and MCP hub. Provides progressive disclosure of tools and skills. Invoke to access the full registered toolset for the current context.",
+  "version": "2.1.0",
+  "description": "Unified skill and MCP hub with progressive disclosure, capability profiles, protected global bindings, and project-scoped context.",
   "category": "core",
   "mcp_servers": [],
   "activation": {
