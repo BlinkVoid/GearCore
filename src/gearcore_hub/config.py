@@ -77,6 +77,42 @@ class McpConfigError(RuntimeError):
     """Stable error that never retains rejected configuration input."""
 
 
+class _SanitizedJsonSchemaValidator:
+    """Delegate a model validator while hiding malformed JSON input.
+
+    Pydantic parses JSON before entering a model's core schema.  This proxy is
+    installed per model through ``__pydantic_on_complete__`` so parser failures
+    receive the same sanitized domain boundary without changing global
+    Pydantic behavior or any non-JSON validator method.
+    """
+
+    __slots__ = ("_error_message", "_validator")
+
+    def __init__(self, validator: Any, error_message: str) -> None:
+        self._validator = validator
+        self._error_message = error_message
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._validator, name)
+
+    def validate_json(self, *args: Any, **kwargs: Any) -> Any:
+        invalid_json = False
+        try:
+            return self._validator.validate_json(*args, **kwargs)
+        except ValidationError as error:
+            invalid_json = any(
+                detail.get("type") == "json_invalid"
+                for detail in error.errors(include_input=False)
+            )
+            if not invalid_json:
+                raise
+        if invalid_json:
+            # Raise after leaving the except suite so the raw parser error and
+            # its input are absent from both __context__ and __cause__.
+            raise McpConfigError(self._error_message)
+        raise AssertionError("unreachable sanitized JSON validation state")
+
+
 def _is_sensitive_config_name(name: object) -> bool:
     """Conservatively identify names conventionally used to carry secrets.
 
@@ -240,7 +276,25 @@ class _SanitizedConfigModel(BaseModel):
 
     @classmethod
     def _validation_error_message(cls, value: object) -> str:
-        raise NotImplementedError
+        return "invalid configuration document"
+
+    @classmethod
+    def _install_json_validation_boundary(cls) -> None:
+        validator = cls.__pydantic_validator__
+        if not isinstance(validator, _SanitizedJsonSchemaValidator):
+            cls.__pydantic_validator__ = _SanitizedJsonSchemaValidator(  # type: ignore[assignment]
+                validator, cls._validation_error_message(None)
+            )
+
+    @classmethod
+    def __pydantic_on_complete__(cls) -> None:
+        cls._install_json_validation_boundary()
+
+    @classmethod
+    def model_rebuild(cls, **kwargs: Any) -> bool | None:
+        rebuilt = super().model_rebuild(**kwargs)
+        cls._install_json_validation_boundary()
+        return rebuilt
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -256,7 +310,7 @@ class _SanitizedConfigModel(BaseModel):
         cls, value: object, handler: core_schema.ValidatorFunctionWrapHandler
     ) -> object:
         if isinstance(value, cls):
-            return value
+            return handler(value)
         cls._preflight_input(value)
         validation_failed = False
         try:
@@ -289,12 +343,12 @@ class McpAuthConfig(_SanitizedConfigModel):
 
     @field_validator("credential_ref", mode="before")
     @classmethod
-    def validate_reference(cls, value: object) -> SecretStr:
+    def validate_reference(cls, value: object) -> str:
         raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
         if not isinstance(raw_value, str):
             raise ValueError("invalid credential reference")
         try:
-            return SecretStr(validate_credential_id(raw_value))
+            return validate_credential_id(raw_value)
         except CredentialError:
             raise ValueError("invalid credential reference") from None
 
@@ -416,6 +470,24 @@ class _SanitizedRegistryConfigModel(BaseModel):
     """Outer config boundary that redacts server references before validation."""
 
     @classmethod
+    def _install_json_validation_boundary(cls) -> None:
+        validator = cls.__pydantic_validator__
+        if not isinstance(validator, _SanitizedJsonSchemaValidator):
+            cls.__pydantic_validator__ = _SanitizedJsonSchemaValidator(  # type: ignore[assignment]
+                validator, "invalid configuration document"
+            )
+
+    @classmethod
+    def __pydantic_on_complete__(cls) -> None:
+        cls._install_json_validation_boundary()
+
+    @classmethod
+    def model_rebuild(cls, **kwargs: Any) -> bool | None:
+        rebuilt = super().model_rebuild(**kwargs)
+        cls._install_json_validation_boundary()
+        return rebuilt
+
+    @classmethod
     def __get_pydantic_core_schema__(
         cls, source_type: Any, handler: GetCoreSchemaHandler
     ) -> core_schema.CoreSchema:
@@ -429,7 +501,7 @@ class _SanitizedRegistryConfigModel(BaseModel):
         cls, value: object, handler: core_schema.ValidatorFunctionWrapHandler
     ) -> object:
         if isinstance(value, cls):
-            return value
+            return handler(value)
         sanitized = _sanitize_registry_servers(value) if isinstance(value, dict) else value
         return handler(sanitized)
 

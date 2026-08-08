@@ -282,6 +282,61 @@ class TestMcpAuthConfig:
 
         _assert_exception_does_not_retain(exc_info.value, SENTINEL)
 
+    @pytest.mark.parametrize(
+        "model_type",
+        [McpAuthConfig, McpServerConfig, GlobalConfig, ProjectConfig],
+    )
+    @pytest.mark.parametrize("api", ["model", "type_adapter"])
+    def test_malformed_json_does_not_retain_input(self, model_type, api: str):
+        malformed = f'{{"API_TOKEN":"{SENTINEL}"'
+
+        with pytest.raises(McpConfigError) as exc_info:
+            if api == "model":
+                model_type.model_validate_json(malformed)
+            else:
+                TypeAdapter(model_type).validate_json(malformed)
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
+    @pytest.mark.parametrize(
+        ("model_type", "valid_payload"),
+        [
+            (McpAuthConfig, {"credential_ref": "operator"}),
+            (McpServerConfig, {"id": "legacy"}),
+            (GlobalConfig, {}),
+            (ProjectConfig, {}),
+        ],
+    )
+    def test_json_sanitizer_survives_model_rebuild(
+        self, model_type, valid_payload: dict[str, object]
+    ):
+        assert model_type.model_rebuild(force=True) is True
+        adapter = TypeAdapter(model_type)
+
+        validated = adapter.validate_json(json.dumps(valid_payload))
+        assert isinstance(validated, model_type)
+        assert isinstance(validated.model_dump_json(), str)
+        assert isinstance(model_type.model_json_schema(), dict)
+
+        malformed = f'{{"API_TOKEN":"{SENTINEL}"'
+        with pytest.raises(McpConfigError) as exc_info:
+            adapter.validate_json(malformed)
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
+    def test_json_sanitizer_delegates_non_json_validator_methods(self):
+        validator = McpServerConfig.__pydantic_validator__
+
+        python_server = validator.validate_python({"id": "python"})
+        strings_server = validator.validate_strings({"id": "strings"})
+        assigned_server = validator.validate_assignment(
+            python_server, "enabled", False
+        )
+
+        assert python_server.id == "python"
+        assert strings_server.id == "strings"
+        assert assigned_server.enabled is False
+
     @pytest.mark.parametrize("method", ["model_validate", "model_validate_json"])
     def test_alternate_auth_validation_does_not_retain_unknown_input(
         self, method: str
