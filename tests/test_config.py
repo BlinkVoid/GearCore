@@ -14,6 +14,7 @@ from gearcore_hub.config import (
     _default_skills_dirs,
     load_config,
 )
+from gearcore_hub.credentials import CredentialStore
 from gearcore_hub.main import cmd_status
 from gearcore_hub.vendor import bundled_superpowers_dir
 
@@ -126,7 +127,19 @@ class TestMcpAuthConfig:
         assert server.command == "legacy"
 
     @pytest.mark.parametrize(
-        "plaintext_field", ["token", "secret", "password", "authorization"]
+        "plaintext_field",
+        [
+            "token",
+            "API_TOKEN",
+            "api_key",
+            "APIKEY",
+            "secret",
+            "client_secret",
+            "password",
+            "credential",
+            "authorization",
+            "Authorization_Header",
+        ],
     )
     def test_plaintext_top_level_credentials_are_rejected_without_echo(
         self, plaintext_field: str
@@ -140,9 +153,76 @@ class TestMcpAuthConfig:
             )
 
         assert SENTINEL not in str(exc_info.value)
+        assert SENTINEL not in repr(exc_info.value)
 
     @pytest.mark.parametrize(
-        "plaintext_field", ["token", "secret", "password", "authorization"]
+        "sensitive_name",
+        [
+            "API_TOKEN",
+            "service_api_key",
+            "PASSWORD",
+            "HIVE_DISPATCHER_CREDENTIAL",
+            "Authorization",
+        ],
+    )
+    def test_sensitive_environment_values_are_rejected_without_echo(
+        self, sensitive_name: str
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            McpServerConfig(
+                id="legacy",
+                type="stdio",
+                command="legacy",
+                env={sensitive_name: SENTINEL},
+            )
+
+        assert SENTINEL not in str(exc_info.value)
+        assert SENTINEL not in repr(exc_info.value)
+
+    @pytest.mark.parametrize("container", ["headers", "http_headers"])
+    def test_sensitive_header_like_extra_is_rejected_without_echo(
+        self, container: str
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            McpServerConfig(
+                id="legacy",
+                type="sse",
+                **{container: {"Authorization": SENTINEL}},
+            )
+
+        assert SENTINEL not in str(exc_info.value)
+        assert SENTINEL not in repr(exc_info.value)
+
+    def test_legitimate_nonsecret_environment_and_v2_extra_remain_compatible(self):
+        server = McpServerConfig(
+            id="legacy",
+            type="stdio",
+            command="legacy",
+            env={
+                "PATH": "/usr/bin",
+                "LOG_LEVEL": "debug",
+                "TOKENIZER_PATH": "/models/tokenizer",
+            },
+            legacy_extension="retained-v2-input",
+        )
+
+        assert server.env == {
+            "PATH": "/usr/bin",
+            "LOG_LEVEL": "debug",
+            "TOKENIZER_PATH": "/models/tokenizer",
+        }
+
+    @pytest.mark.parametrize(
+        "plaintext_field",
+        [
+            "token",
+            "api_key",
+            "apikey",
+            "secret",
+            "password",
+            "credential",
+            "authorization",
+        ],
     )
     def test_plaintext_nested_credentials_are_rejected_without_echo(
         self, plaintext_field: str
@@ -159,6 +239,7 @@ class TestMcpAuthConfig:
             )
 
         assert SENTINEL not in str(exc_info.value)
+        assert SENTINEL not in repr(exc_info.value)
 
     def test_plaintext_yaml_is_rejected_before_entering_config_model(
         self, tmp_path: Path, caplog
@@ -180,22 +261,60 @@ class TestMcpAuthConfig:
             load_global_config(config_file)
 
         assert SENTINEL not in str(exc_info.value)
+        assert SENTINEL not in repr(exc_info.value)
         assert SENTINEL not in caplog.text
 
+    @pytest.mark.parametrize(
+        ("field", "yaml_fragment"),
+        [
+            ("api_key", "      api_key: {sentinel}\n"),
+            ("credential", "      credential: {sentinel}\n"),
+            ("env", "      env:\n        API_TOKEN: {sentinel}\n"),
+            (
+                "headers",
+                "      headers:\n        Authorization: {sentinel}\n",
+            ),
+        ],
+    )
+    def test_plaintext_yaml_routes_are_rejected_without_ingestion(
+        self, tmp_path: Path, caplog, field: str, yaml_fragment: str
+    ):
+        from gearcore_hub.config import load_global_config
+
+        config_file = tmp_path / f"{field}.yaml"
+        config_file.write_text(
+            "version: 2\n"
+            "registry:\n"
+            "  mcp_servers:\n"
+            "    - id: dispatcher\n"
+            "      type: stdio\n"
+            + yaml_fragment.format(sentinel=SENTINEL),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            load_global_config(config_file)
+
+        rendered_error = f"{exc_info.value!s}\n{exc_info.value!r}\n{caplog.text}"
+        assert SENTINEL not in rendered_error
+
     def test_unknown_and_duplicate_auth_settings_are_rejected(self):
-        with pytest.raises(ValidationError, match="extra_forbidden"):
+        with pytest.raises(ValidationError, match="extra_forbidden") as exc_info:
             McpServerConfig(
                 id="dispatcher",
                 type="stdio",
                 auth={
                     "credential_ref": "operator",
                     "stdio_environment": "TOKEN",
-                    "environment": "DUPLICATE_AUTH_CHANNEL",
+                    "environment": SENTINEL,
                 },
             )
 
+        assert SENTINEL not in str(exc_info.value)
+        assert SENTINEL not in repr(exc_info.value)
+
     def test_duplicate_yaml_auth_key_is_rejected_without_secret_log(
-        self, tmp_path: Path, caplog
+        self, tmp_path: Path, caplog, capsys
     ):
         from gearcore_hub.config import load_global_config
 
@@ -217,8 +336,21 @@ class TestMcpAuthConfig:
             config = load_global_config(config_file)
 
         assert config.mcp_servers == []
+        effective = EffectiveConfig(config, None, None)
+        cmd_status(effective)
+        rendered = "\n".join(
+            (
+                repr(config),
+                repr(config.model_dump()),
+                repr(effective),
+                repr(effective.mcp_servers),
+                repr(effective.diagnostic_codes),
+                capsys.readouterr().out,
+                caplog.text,
+            )
+        )
         assert "Failed to parse config" in caplog.text
-        assert SENTINEL not in caplog.text
+        assert SENTINEL not in rendered
 
     @pytest.mark.parametrize(
         "auth",
@@ -233,8 +365,18 @@ class TestMcpAuthConfig:
             McpServerConfig(id="dispatcher", type="stdio", auth=auth)
 
     def test_secret_never_enters_config_dump_repr_status_logs_or_errors(
-        self, capsys, caplog
+        self, tmp_path: Path, capsys, caplog
     ):
+        credential_root = tmp_path / "credentials"
+        credential_root.mkdir(mode=0o700)
+        credential_file = credential_root / "operator"
+        credential_file.write_text(f"{SENTINEL}\n", encoding="utf-8")
+        credential_file.chmod(0o600)
+        loaded_secret = CredentialStore(credential_root).read("operator")
+        assert loaded_secret.get_secret_value() == SENTINEL
+        assert SENTINEL not in str(loaded_secret)
+        assert SENTINEL not in repr(loaded_secret)
+
         global_cfg = GlobalConfig(
             version=3,
             profiles={"default": "operator", "entries": {"operator": {}}},
@@ -262,6 +404,7 @@ class TestMcpAuthConfig:
                 repr(effective.mcp_servers),
                 repr(global_cfg.model_dump()),
                 repr(effective.mcp_servers[0].model_dump()),
+                repr(effective.diagnostic_codes),
                 capsys.readouterr().out,
                 caplog.text,
             )

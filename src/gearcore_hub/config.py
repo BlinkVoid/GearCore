@@ -41,7 +41,63 @@ logger = logging.getLogger("gearcore.config")
 
 _AUTH_MODEL_CONFIG = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_PLAINTEXT_AUTH_FIELDS = {"authorization", "password", "secret", "token"}
+_AUTH_REFERENCE_FIELDS = {"credential_ref", "http_scheme", "stdio_environment"}
+_SENSITIVE_NAME_PARTS = {
+    "authorization",
+    "credential",
+    "credentials",
+    "password",
+    "secret",
+    "token",
+}
+_SENSITIVE_COMPACT_SUFFIXES = (
+    "apikey",
+    "authorization",
+    "credential",
+    "credentials",
+    "password",
+    "privatekey",
+    "secret",
+    "token",
+)
+
+
+def _is_sensitive_config_name(name: object) -> bool:
+    """Conservatively identify names conventionally used to carry secrets.
+
+    Matching uses whole delimiter-separated parts and conventional compact
+    suffixes. It intentionally catches API_TOKEN and service_api_key while
+    allowing unrelated names such as TOKENIZER_PATH.
+    """
+
+    normalized = str(name).casefold()
+    parts = tuple(part for part in re.split(r"[^a-z0-9]+", normalized) if part)
+    compact = "".join(parts)
+    return (
+        bool(_SENSITIVE_NAME_PARTS.intersection(parts))
+        or any(compact.endswith(suffix) for suffix in _SENSITIVE_COMPACT_SUFFIXES)
+        or any(
+            pair == ("api", "key") for pair in zip(parts, parts[1:], strict=False)
+        )
+    )
+
+
+def _contains_plaintext_auth_route(value: object, *, in_auth: bool = False) -> bool:
+    """Inspect server mappings without retaining or rendering their values."""
+
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized_key = str(key).casefold().replace("-", "_")
+            if not (
+                in_auth and normalized_key in _AUTH_REFERENCE_FIELDS
+            ) and _is_sensitive_config_name(key):
+                return True
+            child_is_auth = normalized_key == "auth"
+            if _contains_plaintext_auth_route(nested, in_auth=child_is_auth):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(_contains_plaintext_auth_route(item) for item in value)
+    return False
 
 
 class McpAuthConfig(BaseModel):
@@ -87,14 +143,8 @@ class McpServerConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_plaintext_auth_fields(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            for key in value:
-                normalized = str(key).casefold().replace("-", "_")
-                if normalized in _PLAINTEXT_AUTH_FIELDS or any(
-                    normalized.endswith(f"_{suffix}")
-                    for suffix in _PLAINTEXT_AUTH_FIELDS
-                ):
-                    raise ValueError("plaintext authentication fields are forbidden")
+        if _contains_plaintext_auth_route(value):
+            raise ValueError("plaintext authentication fields are forbidden")
         return value
 
     @model_validator(mode="after")
