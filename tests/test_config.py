@@ -9,7 +9,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
-from pydantic import TypeAdapter
+from pydantic import SecretStr, TypeAdapter
 
 from gearcore_hub.config import (
     EffectiveConfig,
@@ -144,7 +144,7 @@ class TestMcpAuthConfig:
             registry={"mcp_servers": [{"id": "dispatcher", "auth": auth}]}
         )
 
-        assert server.auth is auth
+        assert server.auth is not auth
         assert global_config.mcp_servers[0].auth is not None
         assert global_config.mcp_servers[0].auth.credential_id() == SENTINEL
         assert SENTINEL not in repr(global_config.model_dump())
@@ -580,6 +580,10 @@ class TestMcpAuthConfig:
         assert shallow == model
         assert deep == model
         assert rebuilt == model
+        assert shallow.model_fields_set == model.model_fields_set
+        assert deep.model_fields_set == model.model_fields_set
+        assert shallow.model_extra == model.model_extra
+        assert deep.model_extra == model.model_extra
         assert not caught
 
     @pytest.mark.parametrize("api", ["direct", "validator"])
@@ -626,19 +630,22 @@ class TestMcpAuthConfig:
         shallow = copy.copy(server)
         deep = copy.deepcopy(server)
         round_tripped = pickle.loads(pickle.dumps(server))
-        surfaces = [
+        internal_surfaces = [
             vars(server),
-            dict(server),
             server.__getstate__()["__dict__"],
             vars(shallow),
-            dict(shallow),
             vars(deep),
             vars(round_tripped),
         ]
 
-        for surface in surfaces:
+        for surface in internal_surfaces:
             assert not isinstance(surface["args"], list)
             assert not isinstance(surface["env"], dict)
+        for surface in (dict(server), dict(shallow)):
+            assert isinstance(surface["args"], list)
+            assert isinstance(surface["env"], dict)
+            surface["args"].append(SENTINEL)
+            surface["env"]["API_TOKEN"] = SENTINEL
 
         server.args.append(SENTINEL)
         assert server.env is not None
@@ -687,7 +694,8 @@ class TestMcpAuthConfig:
                 candidate.__getstate__()["__dict__"],
             ):
                 reference = surface["credential_ref"]
-                assert vars(reference) == {}
+                with pytest.raises(TypeError):
+                    vars(reference)
                 with pytest.raises(AttributeError):
                     reference._secret_value = "replacement"
             rendered = (
@@ -765,7 +773,6 @@ class TestMcpAuthConfig:
 
         for surface in (
             vars(config),
-            dict(config),
             config.__getstate__()["__dict__"],
             vars(shallow),
             vars(deep),
@@ -774,6 +781,10 @@ class TestMcpAuthConfig:
             assert not isinstance(surface["registry"], dict)
             with pytest.raises(AttributeError):
                 surface["registry"]._items = (("API_TOKEN", SENTINEL),)
+
+        iterated_registry = dict(config)["registry"]
+        assert isinstance(iterated_registry, dict)
+        iterated_registry["mcp_servers"][0]["args"].append(SENTINEL)
 
         assert config.model_dump() == before
         assert shallow.model_dump() == before
@@ -804,6 +815,196 @@ class TestMcpAuthConfig:
             assert effective.mcp_servers[0].args == ["--mode", "safe"]
             public_registry["mcp_servers"][0]["args"].append(SENTINEL)
             assert SENTINEL not in repr(effective.mcp_servers)
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            McpAuthConfig(credential_ref="operator"),
+            McpServerConfig(id="legacy", args=["--mode", "safe"]),
+            GlobalConfig(registry={"metadata": {"mode": "safe"}}),
+            ProjectConfig(registry={"metadata": {"mode": "safe"}}),
+        ],
+    )
+    def test_valid_raw_state_is_normalized_at_every_serialization_boundary(
+        self, model
+    ):
+        # Deliberate raw-state writes model already-running arbitrary Python.
+        # They are outside the hostile-process boundary; every normal consumer
+        # must nevertheless revalidate and detach the resulting snapshot.
+        if isinstance(model, McpAuthConfig):
+            vars(model)["stdio_environment"] = "NEXT_ENV"
+        elif isinstance(model, McpServerConfig):
+            vars(model)["args"] = ["--mode", "next"]
+        else:
+            vars(model)["registry"] = {"metadata": {"mode": "next"}}
+
+        adapter = TypeAdapter(type(model))
+        with warnings.catch_warnings(record=True) as caught:
+            dumped = model.model_dump()
+            dumped_json = model.model_dump_json()
+            adapter_dump = adapter.dump_python(model)
+            adapter_json = adapter.dump_json(model)
+            iterated = dict(model)
+            state = model.__getstate__()
+            copies = (copy.copy(model), copy.deepcopy(model))
+            round_tripped = pickle.loads(pickle.dumps(model))
+
+        assert not caught
+        rendered = repr((dumped, dumped_json, adapter_dump, adapter_json, iterated))
+        assert SENTINEL not in rendered
+        assert all(copy_.model_dump() == dumped for copy_ in copies)
+        assert round_tripped.model_dump() == dumped
+        assert state["__dict__"] is not vars(model)
+
+    @pytest.mark.parametrize(
+        ("model", "corrupt"),
+        [
+            (
+                McpAuthConfig(credential_ref="operator"),
+                lambda model: vars(model).__setitem__("credential_ref", SENTINEL),
+            ),
+            (
+                McpServerConfig(id="legacy"),
+                lambda model: vars(model).__setitem__(
+                    "args", ["--token", SENTINEL]
+                ),
+            ),
+            (
+                GlobalConfig(),
+                lambda model: vars(model).__setitem__(
+                    "registry",
+                    {"mcp_servers": [{"id": "x", "API_TOKEN": SENTINEL}]},
+                ),
+            ),
+            (
+                ProjectConfig(),
+                lambda model: vars(model).__setitem__("unexpected", SENTINEL),
+            ),
+            (
+                ProjectConfig(),
+                lambda model: object.__setattr__(
+                    model,
+                    "__pydantic_extra__",
+                    {"authorization": SENTINEL},
+                ),
+            ),
+        ],
+    )
+    def test_invalid_raw_state_never_crosses_standard_boundaries(
+        self, model, corrupt
+    ):
+        corrupt(model)
+        assert SENTINEL not in repr(model)
+        adapter = TypeAdapter(type(model))
+        consumers = (
+            model.model_dump,
+            model.model_dump_json,
+            lambda: adapter.dump_python(model),
+            lambda: adapter.dump_json(model),
+            lambda: dict(model),
+            model.__getstate__,
+            lambda: copy.copy(model),
+            lambda: copy.deepcopy(model),
+            lambda: pickle.dumps(model),
+        )
+
+        for consume in consumers:
+            with (
+                warnings.catch_warnings(record=True) as caught,
+                pytest.raises(McpConfigError) as exc_info,
+            ):
+                consume()
+            _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+            assert SENTINEL not in repr(caught)
+
+        with pytest.raises(McpConfigError):
+            if isinstance(model, McpAuthConfig):
+                McpServerConfig(id="x", auth=model)
+            elif isinstance(model, McpServerConfig):
+                GlobalConfig(registry={"mcp_servers": [model]})
+            else:
+                EffectiveConfig(
+                    model if isinstance(model, GlobalConfig) else GlobalConfig(),
+                    model if isinstance(model, ProjectConfig) else None,
+                    None,
+                )
+
+    def test_internal_backing_values_are_attribute_less_and_hash_stable(self):
+        auth = McpAuthConfig(credential_ref="operator")
+        config = GlobalConfig(registry={"metadata": {"nested": ["safe"]}})
+        reference = vars(auth)["credential_ref"]
+        registry = vars(config)["registry"]
+
+        with pytest.raises(TypeError):
+            vars(reference)
+        before_hashes = (hash(reference), hash(registry))
+        for backing in (reference, registry):
+            with pytest.raises((AttributeError, TypeError)):
+                object.__setattr__(backing, "payload", SENTINEL)
+        assert (hash(reference), hash(registry)) == before_hashes
+
+    @pytest.mark.parametrize(
+        "bad_key",
+        [1, SecretStr(SENTINEL), object()],
+    )
+    def test_non_string_mapping_keys_fail_closed(self, bad_key):
+        for payload in (
+            {bad_key: SENTINEL},
+            {"registry": {"metadata": {bad_key: SENTINEL}}},
+        ):
+            with pytest.raises(McpConfigError) as exc_info:
+                GlobalConfig.model_validate(payload)
+            _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
+    @pytest.mark.parametrize("kind", ["cycle", "deep"])
+    def test_recursive_registry_values_fail_closed(self, kind: str):
+        if kind == "cycle":
+            nested: dict[str, object] = {}
+            nested["next"] = nested
+        else:
+            nested = {"value": "safe"}
+            for _ in range(100):
+                nested = {"next": nested}
+
+        with pytest.raises(McpConfigError) as exc_info:
+            GlobalConfig(registry={"metadata": nested})
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
+    def test_effective_config_deeply_snapshots_nested_models(self):
+        global_config = GlobalConfig(
+            disclosure={"strategy": "manual"},
+            resolution={"categories": {"mcp": {"preferred": "safe"}}},
+        )
+        project_config = ProjectConfig(
+            context={"name": "safe"},
+            scope={"mcp_servers": {"include": ["safe"]}},
+        )
+        effective = EffectiveConfig(global_config, project_config, None)
+
+        assert effective.global_cfg.disclosure is not global_config.disclosure
+        assert effective.global_cfg.resolution is not global_config.resolution
+        assert effective.project_cfg is not None
+        assert effective.project_cfg.context is not project_config.context
+        assert effective.project_cfg.scope is not project_config.scope
+
+        global_config.disclosure.strategy = SENTINEL
+        global_config.resolution.categories["mcp"].preferred = SENTINEL
+        project_config.context.name = SENTINEL
+        project_config.scope.mcp_servers["include"].append(SENTINEL)
+
+        assert effective.global_cfg.disclosure.strategy == "manual"
+        assert effective.global_cfg.resolution.categories["mcp"].preferred == "safe"
+        assert effective.project_cfg.context.name == "safe"
+        assert effective.project_cfg.scope.mcp_servers["include"] == ["safe"]
+
+    def test_frozen_mapping_items_and_values_are_structurally_linear(self):
+        registry = {f"key-{index}": index for index in range(1_000)}
+        config = GlobalConfig(registry=registry)
+        backing = vars(config)["registry"]
+
+        assert list(backing.items()) == list(registry.items())
+        assert list(backing.values()) == list(registry.values())
+        assert all(key in backing for key in registry)
 
     @pytest.mark.parametrize("method", ["model_validate", "model_validate_json"])
     def test_alternate_auth_validation_does_not_retain_unknown_input(
