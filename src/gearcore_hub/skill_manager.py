@@ -6,8 +6,10 @@ Loading sequence:
   Phase 2 — project-local skills dir (.gearcore/skills/) appended unconditionally
 
 Visibility rules:
-  - Global skills: visible always; when project context present, only if in allowlist
-  - Project-local skills: invisible with no project context; always visible with project context
+  - Global skills: selected by the effective profile and project allowlist
+  - Project-local skills: visible in project context unless denied or omitted by
+    a version-3 profile overlay
+  - Protected global skills: cannot be hidden or replaced by project context
 """
 
 from __future__ import annotations
@@ -73,6 +75,7 @@ class SkillManager:
         self.skills: dict[str, SkillBundle] = {}
         self.active_skills: set[str] = set()
         self.broken_skills: dict[str, str] = {}  # name → broken target path
+        self._diagnostic_codes: set[str] = set()
         self._load()
         self._auto_activate_core()
 
@@ -83,6 +86,7 @@ class SkillManager:
     def _load(self):
         self.skills.clear()
         self.broken_skills.clear()
+        self._diagnostic_codes.clear()
         project_local_dir: Path | None = None
         if self.config.project_root is not None:
             project_local_dir = self.config.project_root / ".gearcore" / "skills"
@@ -143,6 +147,18 @@ class SkillManager:
         else:
             manifest = SkillManifest(name=skill_path.name, description="")
 
+        if (
+            is_project_local
+            and manifest.name in self.config.protected_skill_names
+        ):
+            self._diagnostic_codes.add("protected_capability_override")
+            self.config._record_diagnostic_code("protected_capability_override")
+            logger.warning(
+                "Ignoring project-local override of protected skill: %s",
+                manifest.name,
+            )
+            return
+
         try:
             instructions = instructions_file.read_text(encoding="utf-8")
         except Exception as exc:
@@ -178,23 +194,32 @@ class SkillManager:
         Names the current context is allowed to see.
 
         - No project: all global skills visible, no project-locals
-        - With project + allowlist: only allowlisted globals + all project-locals
-        - With project + no allowlist key: all globals + all project-locals
+        - Version 2 keeps legacy global filtering + project-local visibility
+        - Version 3 resolves profile includes, project overlays, and denies
+        - Protected globals survive project filtering and collisions
         """
-        result: set[str] = set()
-        allowlist = self.config.global_skill_allowlist  # None = allow all
+        global_names = tuple(
+            name
+            for name, bundle in self.skills.items()
+            if not bundle.is_project_local
+        )
+        project_names = tuple(
+            name
+            for name, bundle in self.skills.items()
+            if bundle.is_project_local and self.config.project_root is not None
+        )
+        resolved = self.config.resolve_skill_capabilities(
+            global_names, project_names
+        )
+        return set(resolved.active)
 
-        for name, bundle in self.skills.items():
-            if bundle.is_project_local:
-                # project-locals only visible when project context present
-                if self.config.project_root is not None:
-                    result.add(name)
-            else:
-                # global skill
-                if allowlist is None or name in allowlist:
-                    result.add(name)
-
-        return result
+    @property
+    def diagnostic_codes(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                (*self.config.diagnostic_codes, *sorted(self._diagnostic_codes))
+            )
+        )
 
     # ------------------------------------------------------------------
     # Public API

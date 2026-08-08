@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from gearcore_hub.config import EffectiveConfig, GlobalConfig, ProjectConfig
+from gearcore_hub.profiles import CapabilityList, resolve_capabilities
 
 ROOT = Path("/tmp/profile-project")
 
@@ -33,6 +34,26 @@ def v2_project(include: list[str]) -> ProjectConfig:
 def v3_global(default: str = "operator") -> GlobalConfig:
     return GlobalConfig(
         version=3,
+        registry={
+            "mcp_servers": [
+                {
+                    "id": "hive-dispatcher",
+                    "type": "stdio",
+                    "command": "/trusted/hive",
+                },
+                {"id": "fs", "type": "stdio", "command": "/trusted/fs"},
+                {
+                    "id": "legacy-server",
+                    "type": "stdio",
+                    "command": "/trusted/legacy",
+                },
+                {
+                    "id": "hive-gateway",
+                    "type": "stdio",
+                    "command": "/trusted/gateway",
+                },
+            ]
+        },
         profiles={
             "default": default,
             "entries": {
@@ -51,7 +72,19 @@ def v3_global(default: str = "operator") -> GlobalConfig:
                     },
                     "disclosure": {"core_skills": ["chrono-core"]},
                 },
-                "hive-worker": {"constrained": True},
+                "hive-worker": {
+                    "constrained": True,
+                    "scope": {
+                        "mcp_servers": {
+                            "include": ["hive-gateway", "hive-dispatcher"],
+                            "deny": ["hive-dispatcher"],
+                        },
+                        "skills": {
+                            "include": ["hive-worker", "hive-dispatcher"],
+                            "deny": ["hive-dispatcher"],
+                        },
+                    },
+                },
             },
         },
     )
@@ -83,6 +116,161 @@ def test_v3_parses_include_deny_and_protected_lists():
     assert operator.scope.skills.include == ("chrono-core", "hive-dispatcher")
     assert operator.scope.skills.deny == ("legacy-skill",)
     assert operator.scope.skills.protected == ("hive-dispatcher",)
+
+
+def test_resolved_capabilities_are_immutable_and_apply_denies_last():
+    result = resolve_capabilities(
+        ("hive-dispatcher", "legacy-server", "fs"),
+        CapabilityList(
+            include=("hive-dispatcher", "legacy-server", "fs"),
+            deny=("legacy-server",),
+            protected=("hive-dispatcher",),
+        ),
+        project_capabilities=("hive-dispatcher", "legacy-server"),
+        project_include=("fs",),
+        project_deny=("hive-dispatcher", "legacy-server"),
+    )
+
+    assert result.active == ("hive-dispatcher", "fs")
+    assert result.denied == ("legacy-server",)
+    assert result.protected == ("hive-dispatcher",)
+    assert result.diagnostics == ("protected_capability_override",)
+    with pytest.raises((AttributeError, TypeError)):
+        result.active += ("unexpected",)
+
+
+def test_protected_global_mcp_survives_restrictive_v2_project_collision():
+    project = ProjectConfig(
+        version=2,
+        scope={
+            "mcp_servers": {
+                "include": ["fs"],
+                "deny": ["hive-dispatcher", "legacy-server"],
+            }
+        },
+        registry={
+            "mcp_servers": [
+                {
+                    "id": "hive-dispatcher",
+                    "type": "stdio",
+                    "command": "/untrusted/hive",
+                },
+                {
+                    "id": "legacy-server",
+                    "type": "stdio",
+                    "command": "/untrusted/legacy",
+                },
+            ]
+        },
+    )
+
+    effective = EffectiveConfig(v3_global(), project, ROOT)
+
+    servers = {server.id: server for server in effective.mcp_servers}
+    assert servers["hive-dispatcher"].command == "/trusted/hive"
+    assert "legacy-server" not in servers
+    assert effective.diagnostic_codes == ("protected_capability_override",)
+
+
+def test_v3_project_overlay_denies_non_protected_and_cannot_override_protected():
+    project = ProjectConfig(
+        version=3,
+        profiles={
+            "entries": {
+                "operator": {
+                    "scope": {
+                        "mcp_servers": {
+                            "include": ["fs"],
+                            "deny": ["hive-dispatcher", "legacy-server"],
+                        }
+                    }
+                }
+            }
+        },
+        registry={
+            "mcp_servers": [
+                {
+                    "id": "hive-dispatcher",
+                    "type": "stdio",
+                    "command": "/untrusted/hive",
+                }
+            ]
+        },
+    )
+
+    effective = EffectiveConfig(v3_global(), project, ROOT)
+
+    servers = {server.id: server for server in effective.mcp_servers}
+    assert servers["hive-dispatcher"].command == "/trusted/hive"
+    assert "legacy-server" not in servers
+    assert effective.diagnostic_codes == ("protected_capability_override",)
+
+
+def test_v3_project_overlay_cannot_select_a_default_profile():
+    with pytest.raises(ValidationError, match="default"):
+        ProjectConfig(
+            version=3,
+            profiles={
+                "default": "hive-worker",
+                "entries": {"hive-worker": {}},
+            },
+        )
+
+
+def test_v3_project_overlay_cannot_declare_protected_capabilities():
+    with pytest.raises(ValidationError, match="cannot declare protected"):
+        ProjectConfig(
+            version=3,
+            profiles={
+                "entries": {
+                    "operator": {
+                        "scope": {
+                            "skills": {"protected": ["hive-dispatcher"]}
+                        }
+                    }
+                }
+            },
+        )
+
+
+def test_wholly_v2_configuration_keeps_ignoring_project_deny_keys():
+    project = ProjectConfig(
+        version=2,
+        scope={
+            "mcp_servers": {
+                "include": ["fs"],
+                "deny": ["fs"],
+            }
+        },
+    )
+
+    effective = EffectiveConfig(v2_global(), project, ROOT)
+
+    assert [server.id for server in effective.mcp_servers] == ["fs"]
+
+
+def test_explicit_worker_profile_cannot_see_denied_dispatcher_server():
+    project = ProjectConfig(
+        version=2,
+        registry={
+            "mcp_servers": [
+                {
+                    "id": "hive-dispatcher",
+                    "type": "stdio",
+                    "command": "/untrusted/hive",
+                }
+            ]
+        },
+    )
+
+    effective = EffectiveConfig(
+        v3_global(), project, ROOT, profile_name="hive-worker"
+    )
+
+    assert effective.profile_name == "hive-worker"
+    server_ids = {server.id for server in effective.mcp_servers}
+    assert "hive-dispatcher" not in server_ids
+    assert "hive-gateway" in server_ids
 
 
 @pytest.mark.parametrize(

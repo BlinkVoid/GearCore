@@ -20,6 +20,40 @@ def _make_skill_dir(base: Path, name: str, manifest: dict = None) -> Path:
     return skill_dir
 
 
+def _v3_skills_config(skills_dir: Path) -> GlobalConfig:
+    return GlobalConfig(
+        version=3,
+        registry={"skills_dirs": [str(skills_dir)]},
+        profiles={
+            "default": "operator",
+            "entries": {
+                "operator": {
+                    "scope": {
+                        "skills": {
+                            "include": [
+                                "hive-dispatcher",
+                                "safe-skill",
+                                "legacy-skill",
+                            ],
+                            "deny": ["legacy-skill"],
+                            "protected": ["hive-dispatcher"],
+                        }
+                    }
+                },
+                "hive-worker": {
+                    "constrained": True,
+                    "scope": {
+                        "skills": {
+                            "include": ["hive-worker", "hive-dispatcher"],
+                            "deny": ["hive-dispatcher"],
+                        }
+                    },
+                },
+            },
+        },
+    )
+
+
 class TestVisibility:
     def test_global_skills_visible_without_project(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,6 +107,106 @@ class TestVisibility:
 
             assert "allowed" in sm.visible_skill_names
             assert "blocked" not in sm.visible_skill_names
+
+    def test_protected_global_skill_survives_v2_project_collision(self, tmp_path):
+        global_skills = tmp_path / "global-skills"
+        project_root = tmp_path / "project"
+        local_skills = project_root / ".gearcore" / "skills"
+        trusted = _make_skill_dir(global_skills, "hive-dispatcher")
+        _make_skill_dir(global_skills, "safe-skill")
+        _make_skill_dir(global_skills, "legacy-skill")
+        _make_skill_dir(local_skills, "hive-dispatcher")
+        _make_skill_dir(local_skills, "legacy-skill")
+        project_cfg = ProjectConfig(
+            version=2,
+            scope={
+                "skills": {
+                    "include": ["safe-skill"],
+                    "deny": ["hive-dispatcher", "legacy-skill"],
+                }
+            },
+        )
+
+        effective = EffectiveConfig(
+            _v3_skills_config(global_skills), project_cfg, project_root
+        )
+        manager = SkillManager(effective)
+
+        dispatcher = manager.get_skill("hive-dispatcher")
+        assert dispatcher is not None
+        assert dispatcher.path == trusted
+        assert dispatcher.is_project_local is False
+        assert manager.get_skill("legacy-skill") is None
+        assert effective.diagnostic_codes == ("protected_capability_override",)
+
+    def test_worker_profile_cannot_see_denied_dispatcher_skill(self, tmp_path):
+        global_skills = tmp_path / "global-skills"
+        project_root = tmp_path / "project"
+        local_skills = project_root / ".gearcore" / "skills"
+        _make_skill_dir(global_skills, "hive-dispatcher")
+        _make_skill_dir(global_skills, "hive-worker")
+        _make_skill_dir(local_skills, "hive-dispatcher")
+
+        effective = EffectiveConfig(
+            _v3_skills_config(global_skills),
+            ProjectConfig(version=2),
+            project_root,
+            profile_name="hive-worker",
+        )
+        manager = SkillManager(effective)
+
+        assert manager.get_skill("hive-dispatcher") is None
+        worker = manager.get_skill("hive-worker")
+        assert worker is not None
+        assert worker.is_project_local is False
+
+    def test_protected_skill_collision_alone_records_diagnostic(self, tmp_path):
+        global_skills = tmp_path / "global-skills"
+        project_root = tmp_path / "project"
+        local_skills = project_root / ".gearcore" / "skills"
+        _make_skill_dir(global_skills, "hive-dispatcher")
+        _make_skill_dir(local_skills, "hive-dispatcher")
+        effective = EffectiveConfig(
+            _v3_skills_config(global_skills),
+            ProjectConfig(
+                version=2,
+                scope={"skills": {"include": ["hive-dispatcher"]}},
+            ),
+            project_root,
+        )
+
+        manager = SkillManager(effective)
+
+        assert effective.diagnostic_codes == ("protected_capability_override",)
+        assert manager.diagnostic_codes == ("protected_capability_override",)
+
+    def test_v3_project_include_filters_project_local_nonprotected_skill(
+        self, tmp_path
+    ):
+        global_skills = tmp_path / "global-skills"
+        project_root = tmp_path / "project"
+        local_skills = project_root / ".gearcore" / "skills"
+        _make_skill_dir(global_skills, "safe-skill")
+        _make_skill_dir(local_skills, "project-only")
+        effective = EffectiveConfig(
+            _v3_skills_config(global_skills),
+            ProjectConfig(
+                version=3,
+                profiles={
+                    "entries": {
+                        "operator": {
+                            "scope": {"skills": {"include": ["safe-skill"]}}
+                        }
+                    }
+                },
+            ),
+            project_root,
+        )
+
+        manager = SkillManager(effective)
+
+        assert "safe-skill" in manager.visible_skill_names
+        assert "project-only" not in manager.visible_skill_names
 
 
 class TestActivation:

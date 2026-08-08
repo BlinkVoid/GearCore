@@ -23,6 +23,9 @@ from gearcore_hub.profiles import (
 from gearcore_hub.profiles import (
     ProfileConfig,
     ProfilesConfig,
+    ProjectProfilesConfig,
+    ResolvedCapabilities,
+    resolve_capabilities,
 )
 from gearcore_hub.vendor import bundled_superpowers_dir
 
@@ -129,6 +132,13 @@ class ProjectConfig(BaseModel):
     scope: ProjectScope = Field(default_factory=ProjectScope)
     registry: dict[str, Any] = Field(default_factory=dict)  # project-local defs
     disclosure: DisclosureConfig | None = None  # overrides global if present
+    profiles: ProjectProfilesConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_profiles_version(self) -> Self:
+        if self.version == 2 and self.profiles is not None:
+            raise ValueError("project profile overlays require configuration version 3")
+        return self
 
     @property
     def mcp_allowlist(self) -> list[str] | None:
@@ -157,12 +167,17 @@ class EffectiveConfig:
         global_cfg: GlobalConfig,
         project_cfg: ProjectConfig | None,
         project_root: Path | None,
+        *,
+        profile_name: str | None = None,
     ):
         self.global_cfg = global_cfg
         self.project_cfg = project_cfg
         self.project_root = project_root
+        self._runtime_diagnostic_codes: set[str] = set()
         self._profile_source = "default"
         if global_cfg.version == 2:
+            if profile_name not in (None, "default"):
+                raise ValueError("version-2 configuration only has the default profile")
             self._profile_name = "default"
             self._profile = ProfileConfig.model_validate(
                 {"disclosure": global_cfg.disclosure.model_dump()}
@@ -171,8 +186,12 @@ class EffectiveConfig:
             profiles = global_cfg.profiles
             if profiles is None:  # GlobalConfig validation makes this unreachable.
                 raise ValueError("profiles are required for configuration version 3")
-            self._profile_name = profiles.default
+            self._profile_name = profile_name or profiles.default
+            if self._profile_name not in profiles.entries:
+                raise ValueError(f"unknown profile {self._profile_name!r}")
             self._profile = profiles.entries[self._profile_name].model_copy(deep=True)
+        self._mcp_servers, self._mcp_capabilities = self._resolve_mcp_servers()
+        self._skill_policy_capabilities = self.resolve_skill_capabilities((), ())
 
     @property
     def profile_name(self) -> str:
@@ -188,27 +207,103 @@ class EffectiveConfig:
 
     # --- MCP servers ---
 
-    @property
-    def mcp_servers(self) -> list[McpServerConfig]:
-        servers = [s for s in self.global_cfg.mcp_servers if s.enabled]
+    def _project_capability_rules(
+        self, capability_kind: Literal["mcp_servers", "skills"]
+    ) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
         if self.project_cfg is None:
-            return servers
-        allowlist = self.project_cfg.mcp_allowlist
-        if allowlist is not None:
-            servers = [s for s in servers if s.id in allowlist]
-        project_servers = [
-            s for s in self.project_cfg.mcp_servers if s.enabled
-        ]
-        project_ids = {s.id for s in project_servers}
-        shadowed = [s.id for s in servers if s.id in project_ids]
+            return None, ()
+
+        if self.project_cfg.version == 3:
+            profiles = self.project_cfg.profiles
+            if profiles is None:
+                return None, ()
+            overlay = profiles.entries.get(self.profile_name)
+            if overlay is None:
+                return None, ()
+            policy = getattr(overlay.scope, capability_kind)
+            return policy.include, policy.deny
+
+        scope = getattr(self.project_cfg.scope, capability_kind)
+        include = scope.get("include")
+        # Version-2 denies remain ignored for wholly version-2 configuration.
+        deny = scope.get("deny", []) if self.global_cfg.version == 3 else []
+        return (
+            None if include is None else tuple(include),
+            tuple(deny),
+        )
+
+    def _resolve_mcp_servers(
+        self,
+    ) -> tuple[tuple[McpServerConfig, ...], ResolvedCapabilities]:
+        global_servers = [s for s in self.global_cfg.mcp_servers if s.enabled]
+        project_servers = (
+            []
+            if self.project_cfg is None
+            else [s for s in self.project_cfg.mcp_servers if s.enabled]
+        )
+        project_include, project_deny = self._project_capability_rules(
+            "mcp_servers"
+        )
+        resolved = resolve_capabilities(
+            (server.id for server in global_servers),
+            self.profile.scope.mcp_servers,
+            project_capabilities=(
+                server.id
+                for server in project_servers
+                if self.project_cfg is None
+                or self.project_cfg.version == 2
+                or project_include is None
+                or server.id in project_include
+            ),
+            project_include=project_include,
+            project_deny=project_deny,
+        )
+
+        global_by_id = {server.id: server for server in global_servers}
+        project_by_id = {server.id: server for server in project_servers}
+        protected = set(resolved.protected)
+        shadowed = sorted(
+            set(global_by_id).intersection(project_by_id).difference(protected)
+        )
         if shadowed:
             logger.warning(
                 "Project MCP server definition(s) %s override global "
                 "definition(s) with the same id",
-                ", ".join(sorted(shadowed)),
+                ", ".join(shadowed),
             )
-            servers = [s for s in servers if s.id not in project_ids]
-        return servers + project_servers
+
+        active = set(resolved.active)
+        servers = [
+            server
+            for server in global_servers
+            if server.id in active
+            and (server.id in protected or server.id not in project_by_id)
+        ]
+        servers.extend(
+            server
+            for server in project_servers
+            if server.id in active and server.id not in protected
+        )
+        return tuple(servers), resolved
+
+    @property
+    def mcp_servers(self) -> list[McpServerConfig]:
+        return list(self._mcp_servers)
+
+    @property
+    def diagnostic_codes(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                (
+                    *self._mcp_capabilities.diagnostics,
+                    *self._skill_policy_capabilities.diagnostics,
+                    *sorted(self._runtime_diagnostic_codes),
+                )
+            )
+        )
+
+    def _record_diagnostic_code(self, code: str) -> None:
+        self._runtime_diagnostic_codes.add(code)
 
     # --- Skills dirs (global first, then project-local) ---
 
@@ -227,6 +322,32 @@ class EffectiveConfig:
         if self.project_cfg is None:
             return None
         return self.project_cfg.skill_allowlist
+
+    @property
+    def protected_skill_names(self) -> tuple[str, ...]:
+        return self.profile.scope.skills.protected
+
+    def resolve_skill_capabilities(
+        self,
+        global_skills: tuple[str, ...],
+        project_skills: tuple[str, ...],
+    ) -> ResolvedCapabilities:
+        project_include, project_deny = self._project_capability_rules("skills")
+        if (
+            self.project_cfg is not None
+            and self.project_cfg.version == 3
+            and project_include is not None
+        ):
+            project_skills = tuple(
+                name for name in project_skills if name in project_include
+            )
+        return resolve_capabilities(
+            global_skills,
+            self.profile.scope.skills,
+            project_capabilities=project_skills,
+            project_include=project_include,
+            project_deny=project_deny,
+        )
 
     # --- Disclosure ---
 
