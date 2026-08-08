@@ -1,8 +1,10 @@
 """Tests for the layered configuration loader."""
 
+import copy
 import json
+import pickle
 import warnings
-from collections import UserDict, deque
+from collections import UserDict, UserList, deque
 from pathlib import Path
 from types import MappingProxyType
 
@@ -616,6 +618,192 @@ class TestMcpAuthConfig:
         assert repr(server) == before_repr
         assert server.model_fields_set == before_fields_set
         assert server.model_extra == before_extra
+
+    def test_normal_state_apis_do_not_expose_mutable_server_backing(self):
+        server = McpServerConfig(
+            id="legacy", args=["--mode", "safe"], env={"MODE": "safe"}
+        )
+        shallow = copy.copy(server)
+        deep = copy.deepcopy(server)
+        round_tripped = pickle.loads(pickle.dumps(server))
+        surfaces = [
+            vars(server),
+            dict(server),
+            server.__getstate__()["__dict__"],
+            vars(shallow),
+            dict(shallow),
+            vars(deep),
+            vars(round_tripped),
+        ]
+
+        for surface in surfaces:
+            assert not isinstance(surface["args"], list)
+            assert not isinstance(surface["env"], dict)
+
+        server.args.append(SENTINEL)
+        assert server.env is not None
+        server.env["API_TOKEN"] = SENTINEL
+        shallow.args.append(SENTINEL)
+
+        rendered = repr(server) + repr(shallow) + repr(deep) + repr(round_tripped)
+        rendered += repr(server.model_dump()) + server.model_dump_json()
+        assert SENTINEL not in rendered
+        assert server.args == ["--mode", "safe"]
+        assert shallow.args == ["--mode", "safe"]
+        assert deep.args == ["--mode", "safe"]
+        assert round_tripped.args == ["--mode", "safe"]
+        with warnings.catch_warnings(record=True) as caught:
+            shallow.model_dump_json()
+            deep.model_dump_json()
+            round_tripped.model_dump_json()
+        assert not caught
+
+    def test_forcibly_corrupted_auth_is_never_trusted_or_rendered(self):
+        auth = McpAuthConfig(credential_ref="operator")
+        vars(auth)["credential_ref"] = SENTINEL
+
+        assert SENTINEL not in repr(auth)
+        for render in (auth.model_dump, auth.model_dump_json):
+            with pytest.raises(McpConfigError) as exc_info:
+                render()
+            _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+        with pytest.raises(McpConfigError) as compose_exc:
+            McpServerConfig(id="legacy", auth=auth)
+        _assert_exception_does_not_retain(compose_exc.value, SENTINEL)
+
+    def test_normal_state_apis_do_not_expose_mutable_auth_backing(self):
+        auth = McpAuthConfig(credential_ref=SENTINEL)
+        copies = [
+            auth,
+            copy.copy(auth),
+            copy.deepcopy(auth),
+            pickle.loads(pickle.dumps(auth)),
+        ]
+
+        for candidate in copies:
+            for surface in (
+                vars(candidate),
+                dict(candidate),
+                candidate.__getstate__()["__dict__"],
+            ):
+                reference = surface["credential_ref"]
+                assert vars(reference) == {}
+                with pytest.raises(AttributeError):
+                    reference._secret_value = "replacement"
+            rendered = (
+                repr(candidate)
+                + repr(candidate.model_dump())
+                + candidate.model_dump_json()
+            )
+            assert SENTINEL not in rendered
+            assert candidate.credential_id() == SENTINEL
+
+    @pytest.mark.parametrize("config_type", [GlobalConfig, ProjectConfig])
+    @pytest.mark.parametrize(
+        "carrier_factory",
+        [
+            lambda: deque([{"auth": {"token": SENTINEL}}]),
+            lambda: UserList([{"auth": {"token": SENTINEL}}]),
+            lambda: {SENTINEL},
+            lambda: McpAuthConfig(credential_ref=SENTINEL),
+        ],
+    )
+    def test_unsupported_legacy_extra_carriers_fail_closed(
+        self, config_type, carrier_factory
+    ):
+        payload = {
+            "id": "legacy",
+            "metadata": carrier_factory(),
+        }
+
+        with pytest.raises(McpConfigError) as exc_info:
+            config_type(registry={"mcp_servers": [payload]})
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
+    @pytest.mark.parametrize("config_type", [GlobalConfig, ProjectConfig])
+    def test_legacy_generator_carrier_is_rejected_without_consumption(
+        self, config_type
+    ):
+        consumed: list[bool] = []
+
+        def carrier():
+            consumed.append(True)
+            yield {"auth": {"token": SENTINEL}}
+
+        with pytest.raises(McpConfigError) as exc_info:
+            config_type(
+                registry={
+                    "mcp_servers": [{"id": "legacy", "metadata": carrier()}]
+                }
+            )
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+        assert consumed == []
+
+    @pytest.mark.parametrize("config_type", [GlobalConfig, ProjectConfig])
+    def test_outer_registry_state_is_immutable_and_defensive(self, config_type):
+        config = config_type(
+            registry={
+                "mcp_servers": [
+                    {
+                        "id": "legacy",
+                        "args": ["--mode", "safe"],
+                        "metadata": {"nested": ["safe"]},
+                    }
+                ]
+            }
+        )
+        before = config.model_dump()
+        shallow = copy.copy(config)
+        deep = copy.deepcopy(config)
+        round_tripped = pickle.loads(pickle.dumps(config))
+
+        public_registry = config.registry
+        public_registry["mcp_servers"][0]["args"].append(SENTINEL)
+        public_registry["mcp_servers"][0]["metadata"]["nested"].append(SENTINEL)
+
+        for surface in (
+            vars(config),
+            dict(config),
+            config.__getstate__()["__dict__"],
+            vars(shallow),
+            vars(deep),
+            vars(round_tripped),
+        ):
+            assert not isinstance(surface["registry"], dict)
+            with pytest.raises(AttributeError):
+                surface["registry"]._items = (("API_TOKEN", SENTINEL),)
+
+        assert config.model_dump() == before
+        assert shallow.model_dump() == before
+        assert deep.model_dump() == before
+        assert round_tripped.model_dump() == before
+        assert round_tripped.model_fields_set == config.model_fields_set
+        assert config.model_extra is None
+        with warnings.catch_warnings(record=True) as caught:
+            shallow.model_dump_json()
+            deep.model_dump_json()
+            round_tripped.model_dump_json()
+        assert not caught
+
+        with pytest.raises(McpConfigError) as direct_exc:
+            config.registry = {"mcp_servers": [{"id": "x", "API_TOKEN": SENTINEL}]}
+        _assert_exception_does_not_retain(direct_exc.value, SENTINEL)
+        with pytest.raises(McpConfigError) as proxy_exc:
+            config.__pydantic_validator__.validate_assignment(
+                config, "registry", SENTINEL
+            )
+        _assert_exception_does_not_retain(proxy_exc.value, SENTINEL)
+        assert config.model_dump() == before
+
+        copied = config.model_copy()
+        assert copied.model_dump() == before
+        if config_type is GlobalConfig:
+            effective = EffectiveConfig(config, None, None)
+            assert effective.mcp_servers[0].args == ["--mode", "safe"]
+            public_registry["mcp_servers"][0]["args"].append(SENTINEL)
+            assert SENTINEL not in repr(effective.mcp_servers)
 
     @pytest.mark.parametrize("method", ["model_validate", "model_validate_json"])
     def test_alternate_auth_validation_does_not_retain_unknown_input(
