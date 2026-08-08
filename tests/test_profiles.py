@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from gearcore_hub.config import EffectiveConfig, GlobalConfig, ProjectConfig
+from gearcore_hub.config import (
+    EffectiveConfig,
+    GlobalConfig,
+    McpConfigError,
+    ProjectConfig,
+)
 from gearcore_hub.profiles import CapabilityList, resolve_capabilities
 
 ROOT = Path("/tmp/profile-project")
@@ -207,7 +212,7 @@ def test_v3_project_overlay_denies_non_protected_and_cannot_override_protected()
 
 
 def test_v3_project_overlay_cannot_select_a_default_profile():
-    with pytest.raises(ValidationError, match="default"):
+    with pytest.raises(McpConfigError):
         ProjectConfig(
             version=3,
             profiles={
@@ -218,7 +223,7 @@ def test_v3_project_overlay_cannot_select_a_default_profile():
 
 
 def test_v3_project_overlay_cannot_declare_protected_capabilities():
-    with pytest.raises(ValidationError, match="cannot declare protected"):
+    with pytest.raises(McpConfigError):
         ProjectConfig(
             version=3,
             profiles={
@@ -365,7 +370,7 @@ def test_disabled_project_collision_with_protected_mcp_is_diagnosed():
 
 
 @pytest.mark.parametrize(
-    ("profile_data", "typo"),
+    ("profile_data", "_typo"),
     [
         (
             {"default": "operator", "entries": {"operator": {}}, "fallback": "operator"},
@@ -404,8 +409,8 @@ def test_disabled_project_collision_with_protected_mcp_is_diagnosed():
         ),
     ],
 )
-def test_v3_rejects_unknown_policy_keys(profile_data: dict, typo: str):
-    with pytest.raises(ValidationError, match=typo):
+def test_v3_rejects_unknown_policy_keys(profile_data: dict, _typo: str):
+    with pytest.raises(McpConfigError):
         GlobalConfig(version=3, profiles=profile_data)
 
 
@@ -462,7 +467,7 @@ def test_effective_profile_collections_cannot_be_appended(collection_name: str):
 
 
 def test_v3_rejects_unknown_default_profile():
-    with pytest.raises(ValidationError, match="default profile.*missing"):
+    with pytest.raises(McpConfigError):
         GlobalConfig(
             version=3,
             profiles={
@@ -473,17 +478,17 @@ def test_v3_rejects_unknown_default_profile():
 
 
 def test_v3_requires_profiles_configuration():
-    with pytest.raises(ValidationError, match="profiles"):
+    with pytest.raises(McpConfigError):
         GlobalConfig(version=3)
 
 
 @pytest.mark.parametrize("version", [1, 4])
 def test_global_config_rejects_unsupported_versions(version: int):
-    with pytest.raises(ValidationError, match="version"):
+    with pytest.raises(McpConfigError):
         GlobalConfig(version=version)
 
 
 @pytest.mark.parametrize("version", [1, 4])
 def test_project_config_rejects_unsupported_versions(version: int):
-    with pytest.raises(ValidationError, match="version"):
+    with pytest.raises(McpConfigError):
         ProjectConfig(version=version)

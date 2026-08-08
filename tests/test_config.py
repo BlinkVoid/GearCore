@@ -337,6 +337,120 @@ class TestMcpAuthConfig:
         assert strings_server.id == "strings"
         assert assigned_server.enabled is False
 
+    @pytest.mark.parametrize(
+        ("model_type", "payload"),
+        [
+            (GlobalConfig, {"registry": SENTINEL}),
+            (GlobalConfig, {"disclosure": SENTINEL}),
+            (ProjectConfig, {"registry": SENTINEL}),
+            (ProjectConfig, {"scope": SENTINEL}),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "api",
+        ["constructor", "model_python", "adapter_python", "model_json", "adapter_json"],
+    )
+    def test_outer_structural_errors_do_not_retain_input(
+        self, model_type, payload: dict[str, object], api: str
+    ):
+        with pytest.raises(McpConfigError) as exc_info:
+            if api == "constructor":
+                model_type(**payload)
+            elif api == "model_python":
+                model_type.model_validate(payload)
+            elif api == "adapter_python":
+                TypeAdapter(model_type).validate_python(payload)
+            elif api == "model_json":
+                model_type.model_validate_json(json.dumps(payload))
+            else:
+                TypeAdapter(model_type).validate_json(json.dumps(payload))
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+
+    @pytest.mark.parametrize("api", ["direct", "validator"])
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("credential_ref", SENTINEL),
+            ("stdio_environment", SENTINEL),
+        ],
+    )
+    def test_frozen_auth_assignment_is_sanitized_and_atomic(
+        self, field_name: str, value: str, api: str
+    ):
+        auth = McpAuthConfig(credential_ref="operator")
+        before = auth.model_dump()
+
+        with pytest.raises(McpConfigError) as exc_info:
+            if api == "direct":
+                setattr(auth, field_name, value)
+            else:
+                auth.__pydantic_validator__.validate_assignment(
+                    auth, field_name, value
+                )
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+        assert auth.model_dump() == before
+
+    @pytest.mark.parametrize("api", ["direct", "validator"])
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("auth", {"token": SENTINEL}),
+            ("env", {"API_TOKEN": SENTINEL}),
+            ("args", ["--token", SENTINEL]),
+        ],
+    )
+    def test_server_assignment_is_sanitized_and_atomic(
+        self, field_name: str, value: object, api: str
+    ):
+        server = McpServerConfig(
+            id="legacy", command="legacy", args=["--mode", "safe"], env={"MODE": "safe"}
+        )
+        before = server.model_dump()
+
+        with pytest.raises(McpConfigError) as exc_info:
+            if api == "direct":
+                setattr(server, field_name, value)
+            else:
+                server.__pydantic_validator__.validate_assignment(
+                    server, field_name, value
+                )
+
+        _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+        assert server.model_dump() == before
+
+    def test_server_benign_assignment_remains_supported(self):
+        server = McpServerConfig(id="legacy")
+
+        server.enabled = False
+
+        assert server.enabled is False
+
+    def test_server_containers_cannot_be_mutated_in_place(self):
+        server = McpServerConfig(
+            id="legacy",
+            args=["--mode", "safe"],
+            env={"MODE": "safe"},
+        )
+
+        with pytest.raises(TypeError) as args_exc:
+            server.args.append(SENTINEL)
+        assert server.env is not None
+        with pytest.raises(TypeError) as env_exc:
+            server.env["API_TOKEN"] = SENTINEL
+        with pytest.raises(TypeError) as base_args_exc:
+            list.append(server.args, SENTINEL)
+        with pytest.raises(TypeError) as base_env_exc:
+            dict.__setitem__(server.env, "API_TOKEN", SENTINEL)
+
+        for exc_info in (args_exc, env_exc, base_args_exc, base_env_exc):
+            _assert_exception_does_not_retain(exc_info.value, SENTINEL)
+        dumped = server.model_dump()
+        assert isinstance(dumped["args"], list)
+        assert isinstance(dumped["env"], dict)
+        assert SENTINEL not in repr(server)
+
     @pytest.mark.parametrize("method", ["model_validate", "model_validate_json"])
     def test_alternate_auth_validation_does_not_retain_unknown_input(
         self, method: str

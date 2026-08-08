@@ -12,9 +12,10 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Literal, NoReturn, Self, SupportsIndex
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 import yaml
@@ -25,6 +26,7 @@ from pydantic import (
     GetCoreSchemaHandler,
     SecretStr,
     ValidationError,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -86,31 +88,162 @@ class _SanitizedJsonSchemaValidator:
     Pydantic behavior or any non-JSON validator method.
     """
 
-    __slots__ = ("_error_message", "_validator")
+    __slots__ = ("_assignment_preflight", "_error_message", "_validator")
 
-    def __init__(self, validator: Any, error_message: str) -> None:
+    def __init__(
+        self,
+        validator: Any,
+        error_message: str,
+        assignment_preflight: Callable[[str, object], None] | None = None,
+    ) -> None:
         self._validator = validator
         self._error_message = error_message
+        self._assignment_preflight = assignment_preflight
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._validator, name)
 
     def validate_json(self, *args: Any, **kwargs: Any) -> Any:
-        invalid_json = False
+        validation_failed = False
         try:
             return self._validator.validate_json(*args, **kwargs)
-        except ValidationError as error:
-            invalid_json = any(
-                detail.get("type") == "json_invalid"
-                for detail in error.errors(include_input=False)
-            )
-            if not invalid_json:
-                raise
-        if invalid_json:
+        except ValidationError:
+            validation_failed = True
+        if validation_failed:
             # Raise after leaving the except suite so the raw parser error and
             # its input are absent from both __context__ and __cause__.
             raise McpConfigError(self._error_message)
         raise AssertionError("unreachable sanitized JSON validation state")
+
+    def validate_assignment(
+        self, instance: object, field_name: str, value: object, *args: Any, **kwargs: Any
+    ) -> Any:
+        if self._assignment_preflight is not None:
+            self._assignment_preflight(field_name, value)
+        validation_failed = False
+        try:
+            validated = self._validator.validate_assignment(
+                instance, field_name, value, *args, **kwargs
+            )
+        except ValidationError:
+            validation_failed = True
+        if validation_failed:
+            raise McpConfigError(self._error_message)
+        return validated
+
+
+def _immutable_container_error() -> NoReturn:
+    raise TypeError("MCP configuration containers are immutable")
+
+
+class _FrozenList(tuple[Any, ...]):
+    """Read-compatible list that cannot mutate model-owned state."""
+
+    def __new__(cls, value: Any = ()) -> Self:
+        return super().__new__(cls, value)
+
+    def __repr__(self) -> str:
+        return repr(list(self))
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, list):
+            return list(self) == other
+        return super().__eq__(other)
+
+    __hash__ = tuple.__hash__
+
+    def __copy__(self) -> Self:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        return self
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        _immutable_container_error()
+
+    def __delitem__(self, key: Any) -> None:
+        _immutable_container_error()
+
+    def __iadd__(self, value: Any) -> Self:  # type: ignore[misc]
+        _immutable_container_error()
+
+    def __imul__(self, value: Any) -> Self:  # type: ignore[misc]
+        _immutable_container_error()
+
+    def append(self, value: Any) -> None:
+        _immutable_container_error()
+
+    def extend(self, value: Any) -> None:
+        _immutable_container_error()
+
+    def insert(self, index: SupportsIndex, value: Any) -> None:
+        _immutable_container_error()
+
+    def remove(self, value: Any) -> None:
+        _immutable_container_error()
+
+    def pop(self, index: SupportsIndex = -1) -> Any:
+        _immutable_container_error()
+
+    def clear(self) -> None:
+        _immutable_container_error()
+
+    def sort(self, *args: Any, **kwargs: Any) -> None:
+        _immutable_container_error()
+
+    def reverse(self) -> None:
+        _immutable_container_error()
+
+
+class _FrozenDict(Mapping[Any, Any]):
+    """Read-compatible dict that cannot mutate model-owned state."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, value: Mapping[Any, Any]) -> None:
+        self._data = dict(value)
+
+    def __getitem__(self, key: Any) -> Any:
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return repr(self._data)
+
+    def __copy__(self) -> Self:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        return self
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        _immutable_container_error()
+
+    def __delitem__(self, key: Any) -> None:
+        _immutable_container_error()
+
+    def __ior__(self, value: Any) -> Self:
+        _immutable_container_error()
+
+    def clear(self) -> None:
+        _immutable_container_error()
+
+    def pop(self, key: Any, default: Any = None) -> Any:
+        _immutable_container_error()
+
+    def popitem(self) -> tuple[Any, Any]:
+        _immutable_container_error()
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        _immutable_container_error()
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        _immutable_container_error()
 
 
 def _is_sensitive_config_name(name: object) -> bool:
@@ -279,11 +412,17 @@ class _SanitizedConfigModel(BaseModel):
         return "invalid configuration document"
 
     @classmethod
+    def _preflight_assignment(cls, field_name: str, value: object) -> None:
+        return
+
+    @classmethod
     def _install_json_validation_boundary(cls) -> None:
         validator = cls.__pydantic_validator__
         if not isinstance(validator, _SanitizedJsonSchemaValidator):
             cls.__pydantic_validator__ = _SanitizedJsonSchemaValidator(  # type: ignore[assignment]
-                validator, cls._validation_error_message(None)
+                validator,
+                cls._validation_error_message(None),
+                cls._preflight_assignment,
             )
 
     @classmethod
@@ -295,6 +434,19 @@ class _SanitizedConfigModel(BaseModel):
         rebuilt = super().model_rebuild(**kwargs)
         cls._install_json_validation_boundary()
         return rebuilt
+
+    def __setattr__(self, field_name: str, value: Any) -> None:
+        model_type = type(self)
+        model_type._preflight_assignment(field_name, value)
+        validation_failed = False
+        try:
+            super().__setattr__(field_name, value)
+        except ValidationError:
+            validation_failed = True
+        if validation_failed:
+            raise McpConfigError(
+                model_type._validation_error_message({field_name: value})
+            )
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -341,6 +493,10 @@ class McpAuthConfig(_SanitizedConfigModel):
     def _validation_error_message(cls, value: object) -> str:
         return "invalid MCP authentication configuration"
 
+    @classmethod
+    def _preflight_assignment(cls, field_name: str, value: object) -> None:
+        raise McpConfigError("MCP authentication configuration is immutable")
+
     @field_validator("credential_ref", mode="before")
     @classmethod
     def validate_reference(cls, value: object) -> str:
@@ -383,7 +539,7 @@ class McpServerConfig(_SanitizedConfigModel):
     # Keep legacy unknown extension fields permissive for version-2
     # compatibility, but prevent Pydantic errors from echoing accidental
     # plaintext credential values.
-    model_config = ConfigDict(hide_input_in_errors=True)
+    model_config = ConfigDict(hide_input_in_errors=True, validate_assignment=True)
 
     id: str
     type: str = "stdio"
@@ -404,6 +560,32 @@ class McpServerConfig(_SanitizedConfigModel):
             return "invalid MCP authentication configuration"
         return "invalid MCP server configuration"
 
+    @classmethod
+    def _preflight_assignment(cls, field_name: str, value: object) -> None:
+        _preflight_server_input({field_name: value})
+
+    @field_validator("args", mode="after")
+    @classmethod
+    def freeze_args(cls, value: list[str]) -> list[str]:
+        return _FrozenList(value)  # type: ignore[return-value]
+
+    @field_validator("env", mode="after")
+    @classmethod
+    def freeze_environment(
+        cls, value: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return None if value is None else _FrozenDict(value)  # type: ignore[return-value]
+
+    @field_serializer("args")
+    def serialize_args(self, value: list[str]) -> list[str]:
+        return list(value)
+
+    @field_serializer("env")
+    def serialize_environment(
+        self, value: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return None if value is None else dict(value)
+
     @model_validator(mode="before")
     @classmethod
     def reject_plaintext_auth_fields(cls, value: Any) -> Any:
@@ -413,18 +595,20 @@ class McpServerConfig(_SanitizedConfigModel):
 
     @model_validator(mode="after")
     def validate_auth_transport(self) -> Self:
-        if self.auth is None:
-            return self
-        if self.type == "stdio":
-            valid = bool(self.auth.stdio_environment) and not self.auth.http_scheme
-        elif self.type in {"sse", "http"}:
-            valid = (
-                not self.auth.stdio_environment and self.auth.http_scheme == "bearer"
-            )
-        else:
-            valid = False
-        if not valid:
-            raise ValueError("invalid authentication configuration for MCP transport")
+        if self.auth is not None:
+            if self.type == "stdio":
+                valid = bool(self.auth.stdio_environment) and not self.auth.http_scheme
+            elif self.type in {"sse", "http"}:
+                valid = (
+                    not self.auth.stdio_environment
+                    and self.auth.http_scheme == "bearer"
+                )
+            else:
+                valid = False
+            if not valid:
+                raise ValueError(
+                    "invalid authentication configuration for MCP transport"
+                )
         return self
 
 
@@ -503,7 +687,14 @@ class _SanitizedRegistryConfigModel(BaseModel):
         if isinstance(value, cls):
             return handler(value)
         sanitized = _sanitize_registry_servers(value) if isinstance(value, dict) else value
-        return handler(sanitized)
+        validation_failed = False
+        try:
+            validated = handler(sanitized)
+        except ValidationError:
+            validation_failed = True
+        if validation_failed:
+            raise McpConfigError("invalid configuration document")
+        return validated
 
 
 class ResolutionCategory(BaseModel):
