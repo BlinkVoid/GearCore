@@ -1143,6 +1143,28 @@ class TestMcpAuthConfig:
         assert first == MappingProxyType(expected)
         assert hash(first) == hash(second)
 
+    def test_frozen_mapping_lookup_uses_mapping_semantics_only(self):
+        backing = vars(GlobalConfig(registry={"zero": 0}))["registry"]
+
+        assert backing["zero"] == 0
+        for key in (0, slice(None)):
+            assert key not in backing
+            with pytest.raises(KeyError):
+                backing[key]
+
+    def test_same_object_nan_is_reflexive_across_safe_copy_paths(self):
+        nan = float("nan")
+        config = GlobalConfig(registry={"value": nan})
+        copies = (
+            config.model_copy(),
+            copy.copy(config),
+            copy.deepcopy(config),
+        )
+
+        assert config == config
+        assert all(candidate == config for candidate in copies)
+        assert GlobalConfig(registry={"value": float("nan")}) != config
+
     @pytest.mark.parametrize("bad_key", [1, SecretStr(SENTINEL), object()])
     def test_server_root_mapping_keys_must_be_plain_strings(self, bad_key):
         with pytest.raises(McpConfigError) as exc_info:

@@ -232,8 +232,6 @@ class _FrozenMapping(tuple[tuple[str, Any], ...], Mapping[str, Any]):
         return tuple.__new__(cls, items)
 
     def __getitem__(self, key: object) -> Any:  # type: ignore[override]
-        if isinstance(key, (int, slice)):
-            return tuple.__getitem__(self, key)
         for candidate, value in tuple.__iter__(self):
             if candidate == key:
                 return value
@@ -291,6 +289,8 @@ def _config_values_equal(
 ) -> bool:
     """Compare immutable snapshots to their ordinary JSON/YAML equivalents."""
 
+    if left is right:
+        return True
     if depth > _MAX_CONFIG_NESTING:
         return False
     if seen is None:
