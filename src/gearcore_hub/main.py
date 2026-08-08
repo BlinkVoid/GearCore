@@ -94,6 +94,14 @@ class GearCoreHub:
                     },
                 ),
             ]
+            if self.config.diagnostic_only:
+                all_tools.append(
+                    Tool(
+                        name="capability_diagnostic",
+                        description="Report why GearCore started without capabilities.",
+                        inputSchema={"type": "object", "properties": {}},
+                    )
+                )
 
             aggregated_raw = []
             for server_id, server in self.process_manager.servers.items():
@@ -153,6 +161,13 @@ class GearCoreHub:
                 text = f"### SKILL LOADED: {skill_name}\n\n{skill.instructions}\n\nTools for '{skill_name}' are now available."
                 return [TextContent(type="text", text=text)]
 
+            if name == "capability_diagnostic" and self.config.diagnostic_only:
+                return [
+                    TextContent(
+                        type="text", text=", ".join(self.config.diagnostic_codes)
+                    )
+                ]
+
             mapping = self.resolved_tool_map.get(name)
             if not mapping:
                 return [
@@ -189,6 +204,8 @@ class GearCoreHub:
                 return [TextContent(type="text", text=f"Error: {exc}")]
 
     async def _start_backends(self):
+        if self.config.diagnostic_only:
+            return
         for server_cfg in self.config.mcp_servers:
             try:
                 await asyncio.wait_for(
@@ -240,6 +257,16 @@ class GearCoreHub:
 
 def cmd_status(config: EffectiveConfig):
     print(f"\nGearCore — context: {config.context_name}")
+    print(f"  Profile: {config.profile_name}")
+    print(f"  Profile source: {config.profile_source}")
+    is_constrained = (
+        config.profile.constrained or config.enforced_profile_name is not None
+    )
+    print(f"  Constrained: {is_constrained}")
+    if config.diagnostic_only:
+        print(f"  Capability diagnostic: {', '.join(config.diagnostic_codes)}")
+        print()
+        return
     if config.project_root:
         print(f"  Project root: {config.project_root}")
 
@@ -353,6 +380,10 @@ def cmd_request_skill(config: EffectiveConfig, skill_name: str):
 def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str):
     import json as _json
 
+    if config.diagnostic_only:
+        print(f"error: {', '.join(config.diagnostic_codes)}")
+        sys.exit(1)
+
     # Find the server config (use effective config to respect project scope)
     server_cfg = None
     for s in config.mcp_servers:
@@ -418,6 +449,26 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Project root containing a .gearcore/ directory. "
         "Auto-detected from CWD if omitted.",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help="Global GearCore configuration file.",
+    )
+    parser.add_argument(
+        "--profile",
+        metavar="NAME",
+        help="Select a configured capability profile.",
+    )
+    parser.add_argument(
+        "--context-envelope",
+        metavar="PATH",
+        help="Signed launch envelope supplied by a trusted launcher.",
+    )
+    parser.add_argument(
+        "--envelope-public-key",
+        metavar="PATH",
+        help="Issuer-bound public key document for launch-envelope verification.",
     )
     parser.add_argument(
         "--verbose",
@@ -535,7 +586,19 @@ def main():
         logger.debug("Verbose logging enabled")
 
     project_path = Path(args.project).resolve() if args.project else None
-    config = load_config(project=project_path)
+    config = load_config(
+        project=project_path,
+        global_config_path=Path(args.config).resolve() if args.config else None,
+        profile_name=args.profile,
+        context_envelope=(
+            Path(args.context_envelope).resolve() if args.context_envelope else None
+        ),
+        envelope_public_key=(
+            Path(args.envelope_public_key).resolve()
+            if args.envelope_public_key
+            else None
+        ),
+    )
 
     command = args.command or "serve"
 

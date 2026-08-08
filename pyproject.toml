@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "anyio>=4.12.1",
+    "cryptography>=46.0.5",
     "mcp>=1.26.0",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",

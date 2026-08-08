@@ -39,6 +39,34 @@ def test_add_mcp_command_flag_does_not_clobber_subcommand():
     assert args.args == ["mcp-atlassian"]
 
 
+def test_launch_policy_flags_are_available_to_runtime_commands():
+    parser = build_parser()
+
+    for command in ("serve", "status", "list", "list-skills", "request-skill", "call"):
+        argv = [
+            "--config",
+            "/safe/config.yaml",
+            "--profile",
+            "hive-worker",
+            "--context-envelope",
+            "/safe/envelope.json",
+            "--envelope-public-key",
+            "/safe/public-key.json",
+            command,
+        ]
+        if command == "request-skill":
+            argv.append("worker")
+        elif command == "call":
+            argv.extend(("hive-gateway", "submit", "{}"))
+
+        args = parser.parse_args(argv)
+
+        assert args.config == "/safe/config.yaml"
+        assert args.profile == "hive-worker"
+        assert args.context_envelope == "/safe/envelope.json"
+        assert args.envelope_public_key == "/safe/public-key.json"
+
+
 def test_status_prints_vendor_manifest(capsys):
     manifest = MagicMock()
     manifest.vendored_commit = "abcdef1234567890"

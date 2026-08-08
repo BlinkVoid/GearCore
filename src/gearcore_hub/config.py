@@ -169,6 +169,9 @@ class EffectiveConfig:
         project_root: Path | None,
         *,
         profile_name: str | None = None,
+        profile_source: str = "default",
+        enforced_profile_name: str | None = None,
+        diagnostic_code: str | None = None,
     ):
         self.global_cfg = global_cfg
         self.project_cfg = (
@@ -176,7 +179,38 @@ class EffectiveConfig:
         )
         self.project_root = project_root
         self._runtime_diagnostic_codes: set[str] = set()
-        self._profile_source = "default"
+        self._profile_source = profile_source
+        self._enforced_profile_name = enforced_profile_name
+        self._diagnostic_only = diagnostic_code is not None
+        self._project_profile: ProfileConfig | None = None
+        self._project_rules: dict[
+            str, tuple[tuple[str, ...] | None, tuple[str, ...]]
+        ]
+        self._mcp_servers: tuple[McpServerConfig, ...]
+        if diagnostic_code is not None:
+            self._profile_name = "unavailable"
+            self._profile = ProfileConfig.model_validate(
+                {
+                    "constrained": True,
+                    "scope": {
+                        "mcp_servers": {"include": []},
+                        "skills": {"include": []},
+                    },
+                }
+            )
+            self._project_profile = None
+            self._project_rules = {
+                "mcp_servers": (None, ()),
+                "skills": (None, ()),
+            }
+            self._mcp_servers = ()
+            self._mcp_capabilities = ResolvedCapabilities(
+                active=(), denied=(), protected=(), diagnostics=(diagnostic_code,)
+            )
+            self._skill_policy_capabilities = ResolvedCapabilities(
+                active=(), denied=(), protected=(), diagnostics=()
+            )
+            return
         if global_cfg.version == 2:
             if profile_name not in (None, "default"):
                 raise ValueError("version-2 configuration only has the default profile")
@@ -192,7 +226,6 @@ class EffectiveConfig:
             if self._profile_name not in profiles.entries:
                 raise ValueError(f"unknown profile {self._profile_name!r}")
             self._profile = profiles.entries[self._profile_name].model_copy(deep=True)
-        self._project_profile: ProfileConfig | None = None
         if (
             self.project_cfg is not None
             and self.project_cfg.version == 3
@@ -217,6 +250,14 @@ class EffectiveConfig:
     @property
     def profile_source(self) -> str:
         return self._profile_source
+
+    @property
+    def enforced_profile_name(self) -> str | None:
+        return self._enforced_profile_name
+
+    @property
+    def diagnostic_only(self) -> bool:
+        return self._diagnostic_only
 
     @property
     def profile(self) -> ProfileConfig:
@@ -269,7 +310,7 @@ class EffectiveConfig:
                 and capability_id not in project_include
             ):
                 continue
-            if self.profile.constrained:
+            if self.profile.constrained or self.enforced_profile_name is not None:
                 if profile_include is not None:
                     if capability_id not in profile_include:
                         continue
@@ -466,6 +507,11 @@ def load_global_config(global_config_path: Path | None = None) -> GlobalConfig:
 def load_config(
     project: Path | None = None,
     global_config_path: Path | None = None,
+    *,
+    profile_name: str | None = None,
+    context_envelope: Path | None = None,
+    envelope_public_key: Path | None = None,
+    now: int | None = None,
 ) -> EffectiveConfig:
     """
     Load and merge global + optional project config.
@@ -496,4 +542,64 @@ def load_config(
         else:
             logger.debug("No project config found at %s", p_file)
 
-    return EffectiveConfig(global_cfg, project_cfg, project_root)
+    envelope_was_supplied = context_envelope is not None
+    key_was_supplied = envelope_public_key is not None
+    if envelope_was_supplied or key_was_supplied:
+        from gearcore_hub.envelope import (
+            ENVELOPE_EXPANSION_DIAGNOSTIC,
+            INVALID_ENVELOPE_DIAGNOSTIC,
+            EnvelopeValidationError,
+            profile_is_subset,
+            verify_envelope_file,
+        )
+
+        def diagnostic(code: str) -> EffectiveConfig:
+            return EffectiveConfig(
+                global_cfg,
+                project_cfg,
+                project_root,
+                profile_source="invalid-envelope",
+                diagnostic_code=code,
+            )
+
+        if context_envelope is None or envelope_public_key is None:
+            return diagnostic(INVALID_ENVELOPE_DIAGNOSTIC)
+        profiles = global_cfg.profiles
+        if global_cfg.version != 3 or profiles is None:
+            return diagnostic(INVALID_ENVELOPE_DIAGNOSTIC)
+        try:
+            verified = verify_envelope_file(
+                Path(context_envelope),
+                Path(envelope_public_key),
+                profiles.entries,
+                now=now,
+            )
+        except EnvelopeValidationError:
+            return diagnostic(INVALID_ENVELOPE_DIAGNOSTIC)
+
+        enforced_profile = profiles.entries[verified.profile]
+        selected_profile_name = profile_name or verified.profile
+        selected_profile = profiles.entries.get(selected_profile_name)
+        if selected_profile is None or not profile_is_subset(
+            selected_profile, enforced_profile
+        ):
+            return EffectiveConfig(
+                global_cfg,
+                project_cfg,
+                project_root,
+                profile_source="envelope",
+                enforced_profile_name=verified.profile,
+                diagnostic_code=ENVELOPE_EXPANSION_DIAGNOSTIC,
+            )
+        return EffectiveConfig(
+            global_cfg,
+            project_cfg,
+            project_root,
+            profile_name=selected_profile_name,
+            profile_source="envelope",
+            enforced_profile_name=verified.profile,
+        )
+
+    return EffectiveConfig(
+        global_cfg, project_cfg, project_root, profile_name=profile_name
+    )
