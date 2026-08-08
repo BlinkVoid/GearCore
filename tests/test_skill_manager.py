@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 from gearcore_hub.config import EffectiveConfig, GlobalConfig, ProjectConfig
+from gearcore_hub.profiles import ProfileConfig
 from gearcore_hub.skill_manager import SkillManager
 
 
@@ -207,6 +208,64 @@ class TestVisibility:
 
         assert "safe-skill" in manager.visible_skill_names
         assert "project-only" not in manager.visible_skill_names
+
+    def test_effective_config_snapshots_selected_project_overlay(self, tmp_path):
+        global_skills = tmp_path / "global-skills"
+        project_root = tmp_path / "project"
+        local_skills = project_root / ".gearcore" / "skills"
+        _make_skill_dir(global_skills, "safe-skill")
+        _make_skill_dir(local_skills, "project-only")
+        project_cfg = ProjectConfig(
+            version=3,
+            profiles={
+                "entries": {
+                    "operator": {
+                        "scope": {"skills": {"include": ["safe-skill"]}}
+                    }
+                }
+            },
+        )
+        effective = EffectiveConfig(
+            _v3_skills_config(global_skills), project_cfg, project_root
+        )
+        assert project_cfg.profiles is not None
+        project_cfg.profiles.entries["operator"] = ProfileConfig.model_validate(
+            {"scope": {"skills": {"include": ["project-only"]}}}
+        )
+        assert effective.project_cfg is not None
+        assert effective.project_cfg.profiles is not None
+        effective.project_cfg.profiles.entries[
+            "operator"
+        ] = ProfileConfig.model_validate(
+            {"scope": {"skills": {"include": ["project-only"]}}}
+        )
+
+        manager = SkillManager(effective)
+
+        assert "safe-skill" in manager.visible_skill_names
+        assert "project-only" not in manager.visible_skill_names
+
+    def test_constrained_profile_rejects_project_local_skill_expansion(
+        self, tmp_path
+    ):
+        global_skills = tmp_path / "global-skills"
+        project_root = tmp_path / "project"
+        local_skills = project_root / ".gearcore" / "skills"
+        _make_skill_dir(global_skills, "hive-worker")
+        _make_skill_dir(local_skills, "shell-root")
+        effective = EffectiveConfig(
+            _v3_skills_config(global_skills),
+            ProjectConfig(
+                version=2,
+                scope={"skills": {"include": ["hive-worker", "shell-root"]}},
+            ),
+            project_root,
+            profile_name="hive-worker",
+        )
+
+        manager = SkillManager(effective)
+
+        assert manager.visible_skill_names == {"hive-worker"}
 
 
 class TestActivation:

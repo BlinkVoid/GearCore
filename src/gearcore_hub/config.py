@@ -171,7 +171,9 @@ class EffectiveConfig:
         profile_name: str | None = None,
     ):
         self.global_cfg = global_cfg
-        self.project_cfg = project_cfg
+        self.project_cfg = (
+            None if project_cfg is None else project_cfg.model_copy(deep=True)
+        )
         self.project_root = project_root
         self._runtime_diagnostic_codes: set[str] = set()
         self._profile_source = "default"
@@ -190,6 +192,21 @@ class EffectiveConfig:
             if self._profile_name not in profiles.entries:
                 raise ValueError(f"unknown profile {self._profile_name!r}")
             self._profile = profiles.entries[self._profile_name].model_copy(deep=True)
+        self._project_profile: ProfileConfig | None = None
+        if (
+            self.project_cfg is not None
+            and self.project_cfg.version == 3
+            and self.project_cfg.profiles is not None
+        ):
+            overlay = self.project_cfg.profiles.entries.get(self.profile_name)
+            if overlay is not None:
+                self._project_profile = overlay.model_copy(deep=True)
+        self._project_rules = {
+            "mcp_servers": self._snapshot_project_capability_rules(
+                "mcp_servers"
+            ),
+            "skills": self._snapshot_project_capability_rules("skills"),
+        }
         self._mcp_servers, self._mcp_capabilities = self._resolve_mcp_servers()
         self._skill_policy_capabilities = self.resolve_skill_capabilities((), ())
 
@@ -207,20 +224,16 @@ class EffectiveConfig:
 
     # --- MCP servers ---
 
-    def _project_capability_rules(
+    def _snapshot_project_capability_rules(
         self, capability_kind: Literal["mcp_servers", "skills"]
     ) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
         if self.project_cfg is None:
             return None, ()
 
         if self.project_cfg.version == 3:
-            profiles = self.project_cfg.profiles
-            if profiles is None:
+            if self._project_profile is None:
                 return None, ()
-            overlay = profiles.entries.get(self.profile_name)
-            if overlay is None:
-                return None, ()
-            policy = getattr(overlay.scope, capability_kind)
+            policy = getattr(self._project_profile.scope, capability_kind)
             return policy.include, policy.deny
 
         scope = getattr(self.project_cfg.scope, capability_kind)
@@ -231,6 +244,39 @@ class EffectiveConfig:
             None if include is None else tuple(include),
             tuple(deny),
         )
+
+    def _project_capability_rules(
+        self, capability_kind: Literal["mcp_servers", "skills"]
+    ) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+        return self._project_rules[capability_kind]
+
+    def _filter_project_capabilities(
+        self,
+        capability_kind: Literal["mcp_servers", "skills"],
+        global_capabilities: tuple[str, ...],
+        project_capabilities: tuple[str, ...],
+        project_include: tuple[str, ...] | None,
+    ) -> tuple[str, ...]:
+        profile_policy = getattr(self.profile.scope, capability_kind)
+        profile_include = profile_policy.include
+        global_ids = set(global_capabilities)
+        result: list[str] = []
+        for capability_id in project_capabilities:
+            if (
+                self.project_cfg is not None
+                and self.project_cfg.version == 3
+                and project_include is not None
+                and capability_id not in project_include
+            ):
+                continue
+            if self.profile.constrained:
+                if profile_include is not None:
+                    if capability_id not in profile_include:
+                        continue
+                elif capability_id not in global_ids:
+                    continue
+            result.append(capability_id)
+        return tuple(result)
 
     def _resolve_mcp_servers(
         self,
@@ -244,19 +290,24 @@ class EffectiveConfig:
         project_include, project_deny = self._project_capability_rules(
             "mcp_servers"
         )
+        global_ids = tuple(server.id for server in global_servers)
+        project_ids = tuple(server.id for server in project_servers)
         resolved = resolve_capabilities(
-            (server.id for server in global_servers),
+            global_ids,
             self.profile.scope.mcp_servers,
-            project_capabilities=(
-                server.id
-                for server in project_servers
-                if self.project_cfg is None
-                or self.project_cfg.version == 2
-                or project_include is None
-                or server.id in project_include
+            project_capabilities=self._filter_project_capabilities(
+                "mcp_servers",
+                global_ids,
+                project_ids,
+                project_include,
             ),
             project_include=project_include,
             project_deny=project_deny,
+            project_override_attempts=(
+                ()
+                if self.project_cfg is None
+                else tuple(server.id for server in self.project_cfg.mcp_servers)
+            ),
         )
 
         global_by_id = {server.id: server for server in global_servers}
@@ -288,7 +339,7 @@ class EffectiveConfig:
 
     @property
     def mcp_servers(self) -> list[McpServerConfig]:
-        return list(self._mcp_servers)
+        return [server.model_copy(deep=True) for server in self._mcp_servers]
 
     @property
     def diagnostic_codes(self) -> tuple[str, ...]:
@@ -333,20 +384,18 @@ class EffectiveConfig:
         project_skills: tuple[str, ...],
     ) -> ResolvedCapabilities:
         project_include, project_deny = self._project_capability_rules("skills")
-        if (
-            self.project_cfg is not None
-            and self.project_cfg.version == 3
-            and project_include is not None
-        ):
-            project_skills = tuple(
-                name for name in project_skills if name in project_include
-            )
         return resolve_capabilities(
             global_skills,
             self.profile.scope.skills,
-            project_capabilities=project_skills,
+            project_capabilities=self._filter_project_capabilities(
+                "skills",
+                global_skills,
+                project_skills,
+                project_include,
+            ),
             project_include=project_include,
             project_deny=project_deny,
+            project_override_attempts=project_skills,
         )
 
     # --- Disclosure ---

@@ -99,6 +99,7 @@ def resolve_capabilities(
     project_capabilities: Iterable[str] = (),
     project_include: Iterable[str] | None = None,
     project_deny: Iterable[str] = (),
+    project_override_attempts: Iterable[str] = (),
 ) -> ResolvedCapabilities:
     """Resolve capability IDs without consulting process or filesystem state.
 
@@ -109,6 +110,7 @@ def resolve_capabilities(
 
     global_ids = _ordered_unique(global_capabilities)
     project_ids = _ordered_unique(project_capabilities)
+    override_attempt_ids = _ordered_unique(project_override_attempts)
     protected = _ordered_unique(global_policy.protected)
     protected_set = set(protected)
 
@@ -133,7 +135,9 @@ def resolve_capabilities(
         None if project_include is None else _ordered_unique(project_include)
     )
     project_deny_tuple = _ordered_unique(project_deny)
-    attempted_override = bool(protected_set.intersection(project_ids))
+    attempted_override = bool(
+        protected_set.intersection((*project_ids, *override_attempt_ids))
+    )
     attempted_override = attempted_override or bool(
         protected_set.intersection(project_deny_tuple)
     )

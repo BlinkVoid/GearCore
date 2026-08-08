@@ -273,6 +273,97 @@ def test_explicit_worker_profile_cannot_see_denied_dispatcher_server():
     assert "hive-gateway" in server_ids
 
 
+def test_constrained_profile_rejects_v2_project_mcp_expansion():
+    project = ProjectConfig(
+        version=2,
+        scope={
+            "mcp_servers": {
+                "include": ["hive-gateway", "shell-root"],
+            }
+        },
+        registry={
+            "mcp_servers": [
+                {
+                    "id": "shell-root",
+                    "type": "stdio",
+                    "command": "/untrusted/shell-root",
+                }
+            ]
+        },
+    )
+
+    effective = EffectiveConfig(
+        v3_global(), project, ROOT, profile_name="hive-worker"
+    )
+
+    assert [server.id for server in effective.mcp_servers] == ["hive-gateway"]
+
+
+def test_constrained_profile_rejects_v3_project_mcp_expansion():
+    project = ProjectConfig(
+        version=3,
+        profiles={
+            "entries": {
+                "hive-worker": {
+                    "scope": {
+                        "mcp_servers": {
+                            "include": ["hive-gateway", "shell-root"],
+                        }
+                    }
+                }
+            }
+        },
+        registry={
+            "mcp_servers": [
+                {
+                    "id": "shell-root",
+                    "type": "stdio",
+                    "command": "/untrusted/shell-root",
+                }
+            ]
+        },
+    )
+
+    effective = EffectiveConfig(
+        v3_global(), project, ROOT, profile_name="hive-worker"
+    )
+
+    assert [server.id for server in effective.mcp_servers] == ["hive-gateway"]
+
+
+def test_effective_mcp_servers_return_isolated_protected_definitions():
+    effective = EffectiveConfig(v3_global(), None, None)
+    first_read = {server.id: server for server in effective.mcp_servers}
+
+    first_read["hive-dispatcher"].command = "/untrusted/replacement"
+
+    second_read = {server.id: server for server in effective.mcp_servers}
+    assert second_read["hive-dispatcher"].command == "/trusted/hive"
+
+
+def test_disabled_project_collision_with_protected_mcp_is_diagnosed():
+    project = ProjectConfig(
+        version=2,
+        scope={"mcp_servers": {"include": ["hive-dispatcher"]}},
+        registry={
+            "mcp_servers": [
+                {
+                    "id": "hive-dispatcher",
+                    "type": "stdio",
+                    "command": "/untrusted/disabled",
+                    "enabled": False,
+                }
+            ]
+        },
+    )
+
+    effective = EffectiveConfig(v3_global(), project, ROOT)
+
+    servers = {server.id: server for server in effective.mcp_servers}
+    assert servers["hive-dispatcher"].command == "/trusted/hive"
+    assert effective.diagnostic_codes == ("protected_capability_override",)
+
+
 @pytest.mark.parametrize(
     ("profile_data", "typo"),
     [
