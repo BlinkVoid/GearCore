@@ -10,10 +10,10 @@ from typing import Any, cast
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
 
 from gearcore_hub.config import EffectiveConfig, McpServerConfig
 from gearcore_hub.credentials import CredentialStore
+from gearcore_hub.mcp_compat import streamablehttp_client
 
 logger = logging.getLogger("gearcore.process_manager")
 
