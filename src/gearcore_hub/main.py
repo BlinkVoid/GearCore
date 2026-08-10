@@ -12,6 +12,8 @@ Subcommands:
   add-skill      Register a skill bundle
   add-cli        Wrap a CLI program into a skill via CLI-Anything
   profile-set    Create or replace a global capability profile
+  migrate-legacy-auth
+                 Move legacy plaintext stdio secrets into credential files
   remove         Remove an MCP server or skill
   sync           Install/update the GearCore self-skill on AI CLI tools
 
@@ -870,6 +872,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_profile.add_argument("--constrained", action="store_true")
     p_profile.add_argument("--default", dest="make_default", action="store_true")
 
+    # migrate-legacy-auth
+    p_migrate_auth = sub.add_parser(
+        "migrate-legacy-auth",
+        help="Move legacy plaintext stdio secrets into credential files",
+    )
+    p_migrate_auth.add_argument(
+        "--credential-root",
+        required=True,
+        help="Owner-only credential directory to receive migrated secrets.",
+    )
+
     # remove
     p_remove = sub.add_parser("remove", help="Remove an MCP server or skill")
     p_remove.add_argument("type", choices=["mcp", "skill"])
@@ -924,6 +937,41 @@ def main():
 
     project_path = Path(args.project) if args.project is not None else None
     command = args.command or "serve"
+
+    if command == "migrate-legacy-auth":
+        from gearcore_hub.config import McpConfigError
+        from gearcore_hub.legacy_auth_migration import (
+            LegacyAuthMigrationError,
+            migrate_legacy_auth,
+        )
+
+        if project_path is not None:
+            print("Error: migrate-legacy-auth is global-only", file=sys.stderr)
+            raise SystemExit(1)
+        if not args.config:
+            print("Error: --config is required", file=sys.stderr)
+            raise SystemExit(1)
+        try:
+            result = migrate_legacy_auth(
+                Path(args.config),
+                Path(args.credential_root),
+            )
+        except (
+            LegacyAuthMigrationError,
+            McpConfigError,
+            OSError,
+            CredentialError,
+            RuntimeError,
+            ValueError,
+        ):
+            print("Error: legacy authentication migration failed", file=sys.stderr)
+            raise SystemExit(1) from None
+        if result.migrated:
+            refs = ", ".join(result.credential_refs)
+            print(f"Migrated {result.migrated} legacy MCP credential(s): {refs}")
+        else:
+            print("Legacy MCP credentials already migrated")
+        return
 
     # Registry authority mutation must not auto-discover or parse a project.
     # It validates and atomically mutates the requested global document itself.

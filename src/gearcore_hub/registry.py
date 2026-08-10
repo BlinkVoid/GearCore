@@ -477,6 +477,7 @@ def _atomic_replace_yaml(
     *,
     directory_fd: int | None = None,
     snapshot: _DocumentSnapshot | None = None,
+    replacement_mode: int | None = None,
 ) -> bool:
     rendered = yaml.safe_dump(
         data,
@@ -504,6 +505,8 @@ def _atomic_replace_yaml(
             mode = stat.S_IMODE(original_metadata.st_mode)
         except OSError:
             raise RuntimeError("configuration changed during mutation") from None
+    if replacement_mode is not None:
+        mode = replacement_mode
 
     temporary: _StagedFile | None = None
     backup: _StagedFile | None = None
