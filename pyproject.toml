@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "anyio>=4.12.1",
-    "mcp>=1.26.0",
+    # mcp 2.0 removed the low-level Server.list_tools()/call_tool() decorator
+    # API the hub is built on; cap below 2.0 until the hub is ported.
+    "mcp>=1.26.0,<2.0",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
 ]

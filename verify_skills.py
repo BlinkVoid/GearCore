@@ -9,18 +9,23 @@ Connects to the GearCore hub via stdio, verifies:
 """
 import asyncio
 import os
+from pathlib import Path
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+REPO_ROOT = Path(__file__).resolve().parent
 
 
 async def verify():
     env = os.environ.copy()
-    env["PYTHONPATH"] = "src"
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
 
     params = StdioServerParameters(
         command="uv",
         args=["run", "python", "-m", "gearcore_hub.main"],
         env=env,
+        cwd=str(REPO_ROOT),
     )
 
     print("Connecting to GearCore Hub...")
