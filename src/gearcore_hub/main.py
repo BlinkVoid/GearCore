@@ -289,7 +289,7 @@ def cmd_status(config: EffectiveConfig):
     print(f"  strategy: {disc.strategy}")
     print(f"  core_skills: {disc.core_skills or '(none)'}")
     print(f"  activation_threshold: {disc.activation_threshold}")
-    from gearcore_hub.vendor import get_upstream_commit, load_vendor_manifest
+    from gearcore_hub.vendor import get_upstream_commit_cached, load_vendor_manifest
 
     manifest = load_vendor_manifest()
     if manifest:
@@ -297,7 +297,7 @@ def cmd_status(config: EffectiveConfig):
         sha = manifest.vendored_commit
         short_sha = sha[:12] if len(sha) >= 12 else sha
         print(f"  superpowers @ {short_sha} ({manifest.vendored_at})")
-        upstream = get_upstream_commit(manifest.source, manifest.source_ref)
+        upstream = get_upstream_commit_cached(manifest.source, manifest.source_ref)
         if upstream and upstream != manifest.vendored_commit:
             upstream_short = upstream[:12] if len(upstream) >= 12 else upstream
             print(

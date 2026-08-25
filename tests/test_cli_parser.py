@@ -49,7 +49,7 @@ def test_status_prints_vendor_manifest(capsys):
     config = load_config(global_config_path=Path("/nonexistent"))
 
     with patch("gearcore_hub.vendor.load_vendor_manifest", return_value=manifest), \
-         patch("gearcore_hub.vendor.get_upstream_commit", return_value="abcdef1234567890"):
+         patch("gearcore_hub.vendor.get_upstream_commit_cached", return_value="abcdef1234567890"):
         cmd_status(config)
 
     captured = capsys.readouterr()
@@ -67,7 +67,7 @@ def test_status_prints_update_hint_when_upstream_different(capsys):
     config = load_config(global_config_path=Path("/nonexistent"))
 
     with patch("gearcore_hub.vendor.load_vendor_manifest", return_value=manifest), \
-         patch("gearcore_hub.vendor.get_upstream_commit", return_value="fedcba0987654321"):
+         patch("gearcore_hub.vendor.get_upstream_commit_cached", return_value="fedcba0987654321"):
         cmd_status(config)
 
     captured = capsys.readouterr()

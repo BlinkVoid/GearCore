@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +17,8 @@ from pydantic import BaseModel
 logger = logging.getLogger("gearcore.vendor")
 
 VENDOR_ROOT = Path(__file__).parent / "third_party" / "superpowers"
+
+CACHE_TTL_SECONDS = 600.0
 
 
 class VendorManifest(BaseModel):
@@ -60,6 +64,48 @@ def get_upstream_commit(source: str, ref: str) -> str | None:
     except Exception as exc:
         logger.debug("git ls-remote failed for %s %s: %s", source, ref, exc)
     return None
+
+
+def _cache_path() -> Path:
+    cache_root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return cache_root / "gearcore" / "ls-remote.json"
+
+
+def get_upstream_commit_cached(
+    source: str, ref: str, *, ttl: float = CACHE_TTL_SECONDS
+) -> str | None:
+    """Like get_upstream_commit, but caches successful lookups for *ttl* seconds.
+
+    Avoids a network round-trip on every `gearcore status` invocation.
+    Failed lookups are not cached so transient network issues retry next call.
+    """
+    path = _cache_path()
+    key = f"{source}#{ref}"
+    data: dict = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception as exc:
+            logger.debug("Ignoring unreadable ls-remote cache: %s", exc)
+
+    entry = data.get(key)
+    if isinstance(entry, dict) and time.time() - entry.get("ts", 0) < ttl:
+        sha = entry.get("sha")
+        return sha if isinstance(sha, str) else None
+
+    sha = get_upstream_commit(source, ref)
+    if sha is None:
+        return None
+
+    data[key] = {"sha": sha, "ts": time.time()}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+    except OSError as exc:
+        logger.debug("Could not write ls-remote cache: %s", exc)
+    return sha
 
 
 def _copy_pattern(source_dir: Path, pattern: str, dest_root: Path) -> None:
