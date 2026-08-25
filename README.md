@@ -2,6 +2,7 @@
 
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/gearcore.svg)](https://pypi.org/project/gearcore/)
 [![MCP](https://img.shields.io/badge/MCP-1.26+-green.svg)](https://modelcontextprotocol.io)
 
 **One skill to rule them all.**
@@ -63,9 +64,8 @@ The MCP hub handshake was verified with a live stdio client (`verify_hub.py`).
 Requires **Python 3.13+** and **[uv](https://docs.astral.sh/uv/)**.
 
 ```bash
-# Install from a local clone (primary path today; no public release yet)
-git clone https://github.com/BlinkVoid/GearCore.git && cd GearCore
-uv tool install .
+# Install the CLI
+uv tool install gearcore
 
 # Install the self-skill into Claude, Codex, Kimi, OpenCode
 gearcore sync
