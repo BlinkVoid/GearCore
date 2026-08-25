@@ -50,6 +50,11 @@ from gearcore_hub.process_manager import ProcessManager, SharedMCPServer
 from gearcore_hub.render import render_skill_instructions
 from gearcore_hub.skill_manager import SkillManager
 
+# Max seconds to wait for any single MCP backend to start before giving up
+# on it and continuing with the rest (one slow/OAuth-blocked backend must
+# not prevent the hub from serving the others).
+BACKEND_START_TIMEOUT = 15.0
+
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -196,10 +201,14 @@ class GearCoreHub:
             try:
                 await asyncio.wait_for(
                     self.process_manager.register_and_start(server_cfg.model_dump()),
-                    timeout=15.0,
+                    timeout=BACKEND_START_TIMEOUT,
                 )
             except TimeoutError:
-                logger.error("Backend '%s' failed to start within 15s", server_cfg.id)
+                logger.error(
+                    "Backend '%s' failed to start within %ss",
+                    server_cfg.id,
+                    BACKEND_START_TIMEOUT,
+                )
             except Exception as exc:
                 logger.error("Failed to start backend '%s': %s", server_cfg.id, exc)
 
