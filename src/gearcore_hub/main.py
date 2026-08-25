@@ -75,6 +75,7 @@ class GearCoreHub:
         self.skill_manager = SkillManager(config)
         self.conflict_resolver = ConflictResolver(config.resolution.model_dump())
         self.resolved_tool_map: dict = {}
+        self.failed_backends: dict[str, str] = {}
         self.server = Server("gearcore-hub")
         self._setup_handlers()
 
@@ -196,25 +197,44 @@ class GearCoreHub:
                 logger.error("Tool call %s failed: %s", name, exc)
                 return [TextContent(type="text", text=f"Error: {exc}")]
 
+    async def _start_one_backend(self, server_cfg) -> str | None:
+        """Start one backend; return its id on failure, None on success."""
+        try:
+            await asyncio.wait_for(
+                self.process_manager.register_and_start(server_cfg.model_dump()),
+                timeout=BACKEND_START_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.error(
+                "Backend '%s' failed to start within %ss",
+                server_cfg.id,
+                BACKEND_START_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.error("Failed to start backend '%s': %s", server_cfg.id, exc)
+        else:
+            return None
+        return str(server_cfg.id)
+
     async def _start_backends(self):
-        for server_cfg in self.config.mcp_servers:
-            try:
-                await asyncio.wait_for(
-                    self.process_manager.register_and_start(server_cfg.model_dump()),
-                    timeout=BACKEND_START_TIMEOUT,
-                )
-            except TimeoutError:
-                logger.error(
-                    "Backend '%s' failed to start within %ss",
-                    server_cfg.id,
-                    BACKEND_START_TIMEOUT,
-                )
-            except Exception as exc:
-                logger.error("Failed to start backend '%s': %s", server_cfg.id, exc)
+        # Start all backends concurrently so one slow/OAuth-blocked backend
+        # cannot multiply startup latency by the number of registered servers.
+        results = await asyncio.gather(
+            *(self._start_one_backend(cfg) for cfg in self.config.mcp_servers)
+        )
+        failed = [server_id for server_id in results if server_id is not None]
+        self.failed_backends = dict.fromkeys(failed, "failed to start or timed out")
 
     async def run(self):
         await self._start_backends()
-        logger.info("GearCore ready (context: %s)", self.config.context_name)
+        if getattr(self, "failed_backends", None):
+            logger.warning(
+                "GearCore ready (context: %s); unavailable backends: %s",
+                self.config.context_name,
+                ", ".join(sorted(self.failed_backends)),
+            )
+        else:
+            logger.info("GearCore ready (context: %s)", self.config.context_name)
 
         try:
             async with stdio_server() as (read_stream, write_stream):

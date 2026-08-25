@@ -57,6 +57,8 @@ def test_hanging_backend_does_not_block_others(caplog):
     assert "slow-oauth" not in hub.process_manager.servers
     assert "healthy" in hub.process_manager.servers
     assert hub.process_manager.servers["healthy"].session is not None
+    assert "slow-oauth" in hub.failed_backends
+    assert "healthy" not in hub.failed_backends
 
 
 def test_failing_backend_does_not_block_others():
@@ -75,6 +77,27 @@ def test_failing_backend_does_not_block_others():
     hub = asyncio.run(scenario())
     assert "broken" not in hub.process_manager.servers
     assert "healthy" in hub.process_manager.servers
+    assert "broken" in hub.failed_backends
+
+
+def test_hanging_backends_time_out_in_parallel():
+    async def scenario():
+        import time
+
+        hub = _make_hub(["a", "b", "c"])
+
+        async def fake_register(cfg):
+            await asyncio.sleep(5.0)  # every backend hangs
+
+        hub.process_manager.register_and_start = fake_register
+        start = time.monotonic()
+        await hub._start_backends()
+        return time.monotonic() - start, hub
+
+    elapsed, hub = asyncio.run(scenario())
+    # Sequential would cost 3 x BACKEND_START_TIMEOUT (0.6s); parallel ~0.2s.
+    assert elapsed < 0.45
+    assert set(hub.failed_backends) == {"a", "b", "c"}
 
 
 def test_shutdown_with_no_servers_is_clean():

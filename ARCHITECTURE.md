@@ -118,6 +118,15 @@ Manages shared MCP server processes. Each server is started once and multiplexed
 - Async lock-protected initialization (idempotent)
 - `AsyncExitStack` for guaranteed cleanup on shutdown
 
+**Startup model:** all registered backends start **concurrently**
+(`asyncio.gather` in `_start_backends`). Each backend gets an independent
+`BACKEND_START_TIMEOUT` (15s); a backend that hangs (e.g. waiting for
+interactive OAuth) is abandoned and recorded in `GearCore.failed_backends`,
+which is logged as a warning at startup. One failing backend never blocks
+hub startup or the other backends — worst-case startup latency is
+`max(per-backend time)` rather than the sum. Contract locked by
+`tests/test_backend_isolation.py`.
+
 ---
 
 ## Conflict Resolution
