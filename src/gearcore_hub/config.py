@@ -34,6 +34,7 @@ class McpServerConfig(BaseModel):
     url: str = ""
     env: dict[str, str] | None = None
     enabled: bool = True
+    update_metadata: dict[str, Any] | None = None
 
 
 class ResolutionCategory(BaseModel):

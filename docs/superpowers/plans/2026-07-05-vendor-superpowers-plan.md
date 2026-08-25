@@ -800,7 +800,7 @@ done
 Run:
 
 ```bash
-uv tool install --reinstall ~/workspace/GearCore
+uv tool install --reinstall ~/src/gearcore
 gearcore status
 gearcore list-skills | grep using-superpowers
 ```

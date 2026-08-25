@@ -13,6 +13,7 @@ Subcommands:
   add-cli        Wrap a CLI program into a skill via CLI-Anything
   remove         Remove an MCP server or skill
   sync           Install/update the GearCore self-skill on AI CLI tools
+  onboard        Discover and register MCP servers and/or skills from a core package
 
 Usage:
   gearcore [--project <path>] list-skills
@@ -24,6 +25,7 @@ Usage:
   gearcore add-cli <program> [--scope global|project]
   gearcore remove mcp <id> | skill <name> [--scope global|project]
   gearcore sync [--tool claude|codex|kimi|opencode] [--dry-run] [--remove]
+  gearcore onboard <core-path> [--scope global|project]
   gearcore status
 """
 
@@ -43,9 +45,15 @@ from mcp.types import TextContent, Tool
 
 from gearcore_hub.config import EffectiveConfig, load_config
 from gearcore_hub.conflict_resolver import ConflictResolver
+from gearcore_hub.onboard import cmd_onboard
 from gearcore_hub.process_manager import ProcessManager, SharedMCPServer
 from gearcore_hub.render import render_skill_instructions
 from gearcore_hub.skill_manager import SkillManager
+
+# Max seconds to wait for any single MCP backend to start before giving up
+# on it and continuing with the rest (one slow/OAuth-blocked backend must
+# not prevent the hub from serving the others).
+BACKEND_START_TIMEOUT = 15.0
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -67,6 +75,7 @@ class GearCoreHub:
         self.skill_manager = SkillManager(config)
         self.conflict_resolver = ConflictResolver(config.resolution.model_dump())
         self.resolved_tool_map: dict = {}
+        self.failed_backends: dict[str, str] = {}
         self.server = Server("gearcore-hub")
         self._setup_handlers()
 
@@ -188,21 +197,44 @@ class GearCoreHub:
                 logger.error("Tool call %s failed: %s", name, exc)
                 return [TextContent(type="text", text=f"Error: {exc}")]
 
+    async def _start_one_backend(self, server_cfg) -> str | None:
+        """Start one backend; return its id on failure, None on success."""
+        try:
+            await asyncio.wait_for(
+                self.process_manager.register_and_start(server_cfg.model_dump()),
+                timeout=BACKEND_START_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.error(
+                "Backend '%s' failed to start within %ss",
+                server_cfg.id,
+                BACKEND_START_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.error("Failed to start backend '%s': %s", server_cfg.id, exc)
+        else:
+            return None
+        return str(server_cfg.id)
+
     async def _start_backends(self):
-        for server_cfg in self.config.mcp_servers:
-            try:
-                await asyncio.wait_for(
-                    self.process_manager.register_and_start(server_cfg.model_dump()),
-                    timeout=15.0,
-                )
-            except TimeoutError:
-                logger.error("Backend '%s' failed to start within 15s", server_cfg.id)
-            except Exception as exc:
-                logger.error("Failed to start backend '%s': %s", server_cfg.id, exc)
+        # Start all backends concurrently so one slow/OAuth-blocked backend
+        # cannot multiply startup latency by the number of registered servers.
+        results = await asyncio.gather(
+            *(self._start_one_backend(cfg) for cfg in self.config.mcp_servers)
+        )
+        failed = [server_id for server_id in results if server_id is not None]
+        self.failed_backends = dict.fromkeys(failed, "failed to start or timed out")
 
     async def run(self):
         await self._start_backends()
-        logger.info("GearCore ready (context: %s)", self.config.context_name)
+        if getattr(self, "failed_backends", None):
+            logger.warning(
+                "GearCore ready (context: %s); unavailable backends: %s",
+                self.config.context_name,
+                ", ".join(sorted(self.failed_backends)),
+            )
+        else:
+            logger.info("GearCore ready (context: %s)", self.config.context_name)
 
         try:
             async with stdio_server() as (read_stream, write_stream):
@@ -257,7 +289,7 @@ def cmd_status(config: EffectiveConfig):
     print(f"  strategy: {disc.strategy}")
     print(f"  core_skills: {disc.core_skills or '(none)'}")
     print(f"  activation_threshold: {disc.activation_threshold}")
-    from gearcore_hub.vendor import get_upstream_commit, load_vendor_manifest
+    from gearcore_hub.vendor import get_upstream_commit_cached, load_vendor_manifest
 
     manifest = load_vendor_manifest()
     if manifest:
@@ -265,7 +297,7 @@ def cmd_status(config: EffectiveConfig):
         sha = manifest.vendored_commit
         short_sha = sha[:12] if len(sha) >= 12 else sha
         print(f"  superpowers @ {short_sha} ({manifest.vendored_at})")
-        upstream = get_upstream_commit(manifest.source, manifest.source_ref)
+        upstream = get_upstream_commit_cached(manifest.source, manifest.source_ref)
         if upstream and upstream != manifest.vendored_commit:
             upstream_short = upstream[:12] if len(upstream) >= 12 else upstream
             print(
@@ -292,9 +324,7 @@ def cmd_list_skills(config: EffectiveConfig):
 
     # Level-0 skills: reveal full instructions inline, before the listing.
     level0 = [
-        name
-        for name in config.disclosure.core_skills
-        if name in sm.visible_skill_names
+        name for name in config.disclosure.core_skills if name in sm.visible_skill_names
     ]
     for name in level0:
         bundle = sm.skills[name]
@@ -507,6 +537,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--dry-run", action="store_true")
     p_sync.add_argument("--remove", action="store_true", help="Unlink from all tools")
 
+    # onboard
+    p_onboard = sub.add_parser(
+        "onboard",
+        help="Discover and register MCP servers and/or skills from a core package",
+    )
+    p_onboard.add_argument("core_path", help="Path to the core directory")
+    p_onboard.add_argument("--scope", default="global", choices=["global", "project"])
+    p_onboard.add_argument(
+        "--mcp-id",
+        help="Explicit MCP id (defaults to single skill name or script-derived name)",
+    )
+    p_onboard.add_argument(
+        "--mcp-script",
+        help="Explicit MCP script name from [project.scripts] (required if ambiguous)",
+    )
+    p_onboard.add_argument(
+        "--copy-skills",
+        action="store_true",
+        help="Copy skill bundles (default: symlink)",
+    )
+    p_onboard.add_argument("--dry-run", action="store_true")
+    p_onboard.add_argument(
+        "--tool",
+        nargs="*",
+        metavar="TOOL",
+        help="Specific tools to sync after onboarding (claude|codex|kimi|opencode).",
+    )
+    p_onboard.add_argument(
+        "--no-sync", action="store_true", help="Skip sync after onboarding"
+    )
+
     # update-superpowers
     p_update_sp = sub.add_parser(
         "update-superpowers",
@@ -516,6 +577,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show whether an update is available without writing files",
+    )
+
+    # update
+    p_update = sub.add_parser(
+        "update",
+        help="Refresh registered MCP servers, skills, superpowers, and self-skill sync",
+    )
+    p_update.add_argument(
+        "resource",
+        nargs="?",
+        choices=["mcp", "skill", "superpowers"],
+        help="Resource type to update",
+    )
+    p_update.add_argument(
+        "name",
+        nargs="?",
+        help="MCP server id or skill name (only when resource is specified)",
+    )
+    p_update.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show pending changes without applying",
+    )
+    p_update.add_argument(
+        "--source-path",
+        type=Path,
+        help="Override source path for mcp/skill update",
     )
 
     return parser
@@ -664,6 +752,16 @@ def main():
             upstream = result["upstream"]
             upstream_short = upstream[:12] if len(upstream) >= 12 else upstream
             print(f"superpowers is up to date ({upstream_short})")
+        return
+
+    if command == "update":
+        from gearcore_hub.update import cmd_update
+
+        cmd_update(config, args)
+        return
+
+    if command == "onboard":
+        cmd_onboard(args, project_path)
         return
 
     parser.print_help()

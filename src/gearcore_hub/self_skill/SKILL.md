@@ -82,6 +82,9 @@ globally will not appear when working in a backend API project that hasn't allow
 # Register a new MCP server (global)
 gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
 
+# Onboard a whole core package (register discovered MCP servers and/or skills)
+gearcore onboard <path-to-core> [--scope global|project]
+
 # Register an existing skill bundle (global or project)
 gearcore --project /path/to/project add-skill /path/to/skill --scope project
 
@@ -103,4 +106,14 @@ gearcore sync              # auto-detect installed tools (claude, codex, kimi, o
 gearcore sync --tool kimi  # specific tool only
 gearcore sync --dry-run    # preview without changes
 gearcore sync --remove     # unlink from all tools
+```
+
+## Refresh registered resources
+
+```
+gearcore update                        # update everything, then re-sync self-skill
+gearcore update mcp <id>               # refresh one MCP server from its source
+gearcore update skill <name>           # refresh one skill bundle
+gearcore update superpowers            # refresh vendored superpowers skills
+gearcore update --dry-run              # preview pending changes without applying
 ```

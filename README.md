@@ -29,6 +29,10 @@ GearCore is a unified skill and MCP hub that aggregates all your AI tools behind
 └─────────────────────────────────────────────────────────────┘
 ```
 
+*The numbers above are illustrative, not measured. The structural claim —
+one config instead of N copies per tool per project — is what matters;
+exact token costs depend on each client's MCP schema serialization.*
+
 ## Features
 
 - **🎭 Appears as a native skill** — AI tools invoke `gearcore` directly via their skill discovery. No MCP config duplication.
@@ -44,11 +48,9 @@ GearCore is a unified skill and MCP hub that aggregates all your AI tools behind
 Requires **Python 3.13+** and **[uv](https://docs.astral.sh/uv/)**.
 
 ```bash
-# Install the CLI
-uv tool install git+https://github.com/yourusername/gearcore
-
-# Or install from local source
-uv tool install /path/to/GearCore
+# Install from a local clone (primary path today; no public release yet)
+git clone <repo-url> && cd GearCore
+uv tool install .
 
 # Install the self-skill into Claude, Codex, Kimi, OpenCode
 gearcore sync
@@ -66,11 +68,11 @@ gearcore status
 
 ```bash
 # Filesystem access
-geracore add-mcp --id filesystem --type stdio \
+gearcore add-mcp --id filesystem --type stdio \
   --command npx --args -y @modelcontextprotocol/server-filesystem /home/user/workspace
 
 # Web research via Playwright
-geracore add-mcp --id playwright --type stdio \
+gearcore add-mcp --id playwright --type stdio \
   --command npx --args -y @playwright/mcp
 ```
 
@@ -78,20 +80,42 @@ geracore add-mcp --id playwright --type stdio \
 
 ```bash
 # A skill is just a directory with SKILL.md + manifest.json
-geracore add-skill /path/to/my-skill
+gearcore add-skill /path/to/my-skill
 ```
 
-### 4. See what's available
+### 4. Or onboard a whole core package
 
 ```bash
-geracore list-skills
+gearcore onboard /path/to/core
+```
+
+Discovers `skills/*/SKILL.md` and MCP scripts in `pyproject.toml`, then registers what is found.
+
+### 5. Updating resources
+
+```bash
+# Update everything (MCP servers, skills, superpowers, self-skill sync)
+gearcore update
+
+# Update a single MCP server or skill
+gearcore update mcp sample-prompts
+gearcore update skill memory
+
+# Preview changes without applying
+gearcore update --dry-run
+```
+
+### 6. See what's available
+
+```bash
+gearcore list-skills
 # GearCore skills (global context):
 #   web-research — Web browsing and research via Playwright
 #   filesystem — Secure filesystem access
 #   memory — Persistent memory via SampleMemory
 ```
 
-### 5. AI tools use it
+### 7. AI tools use it
 
 Once synced, Kimi/Claude/Codex/OpenCode loads GearCore as a skill and follows this flow:
 
@@ -179,9 +203,11 @@ list_tools → now includes browser_navigate, browser_click, ...
 | `gearcore serve` | Run the MCP hub (used automatically by AI tools) |
 | `gearcore add-mcp` | Register a new MCP server (`--scope project` for a project-local def, add `--allowlist` to allowlist an existing global server instead) |
 | `gearcore add-skill <path>` | Register a skill bundle |
+| `gearcore onboard <core-path>` | Discover and register MCP servers and/or skills from a core package |
 | `gearcore add-cli <program>` | Wrap a CLI program into a skill |
 | `gearcore remove mcp\|skill <name>` | Remove an MCP or skill |
 | `gearcore sync` | Install self-skill to Claude / Codex / Kimi / OpenCode |
+| `gearcore update [mcp\|skill\|superpowers] [name]` | Version-aware refresh of registered resources, then re-sync |
 
 All commands accept `--project <path>` for project-scoped context and `-v` for verbose output.
 
@@ -243,7 +269,7 @@ See [SKILL_SCHEMA.md](SKILL_SCHEMA.md) for the full specification.
 
 ```bash
 # Clone
-git clone https://github.com/yourusername/gearcore
+git clone <repo-url>
 cd GearCore
 
 # Install in editable mode
