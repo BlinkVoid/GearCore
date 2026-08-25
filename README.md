@@ -29,6 +29,10 @@ GearCore is a unified skill and MCP hub that aggregates all your AI tools behind
 └─────────────────────────────────────────────────────────────┘
 ```
 
+*The numbers above are illustrative, not measured. The structural claim —
+one config instead of N copies per tool per project — is what matters;
+exact token costs depend on each client's MCP schema serialization.*
+
 ## Features
 
 - **🎭 Appears as a native skill** — AI tools invoke `gearcore` directly via their skill discovery. No MCP config duplication.
@@ -44,11 +48,9 @@ GearCore is a unified skill and MCP hub that aggregates all your AI tools behind
 Requires **Python 3.13+** and **[uv](https://docs.astral.sh/uv/)**.
 
 ```bash
-# Install the CLI
-uv tool install git+https://github.com/yourusername/gearcore
-
-# Or install from local source
-uv tool install /path/to/GearCore
+# Install from a local clone (primary path today; no public release yet)
+git clone <repo-url> && cd GearCore
+uv tool install .
 
 # Install the self-skill into Claude, Codex, Kimi, OpenCode
 gearcore sync
@@ -66,11 +68,11 @@ gearcore status
 
 ```bash
 # Filesystem access
-geracore add-mcp --id filesystem --type stdio \
+gearcore add-mcp --id filesystem --type stdio \
   --command npx --args -y @modelcontextprotocol/server-filesystem /home/user/workspace
 
 # Web research via Playwright
-geracore add-mcp --id playwright --type stdio \
+gearcore add-mcp --id playwright --type stdio \
   --command npx --args -y @playwright/mcp
 ```
 
@@ -78,7 +80,7 @@ geracore add-mcp --id playwright --type stdio \
 
 ```bash
 # A skill is just a directory with SKILL.md + manifest.json
-geracore add-skill /path/to/my-skill
+gearcore add-skill /path/to/my-skill
 ```
 
 ### 4. Or onboard a whole core package
@@ -106,7 +108,7 @@ gearcore update --dry-run
 ### 6. See what's available
 
 ```bash
-geracore list-skills
+gearcore list-skills
 # GearCore skills (global context):
 #   web-research — Web browsing and research via Playwright
 #   filesystem — Secure filesystem access
@@ -267,7 +269,7 @@ See [SKILL_SCHEMA.md](SKILL_SCHEMA.md) for the full specification.
 
 ```bash
 # Clone
-git clone https://github.com/yourusername/gearcore
+git clone <repo-url>
 cd GearCore
 
 # Install in editable mode
