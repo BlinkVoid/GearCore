@@ -5,18 +5,24 @@ All notable changes to GearCore will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0] - 2026-08-25
 
 ### Added
 - `gearcore update` command with version-aware refresh for MCP servers,
   skill bundles, and superpowers, followed by self-skill re-sync
 - `gearcore onboard` command: discovers MCP scripts and skill bundles in a
   core package directory and registers them in one step
-- `gearcore sync` now targets OpenCode: symlinks the self-skill into
-  `~/.config/opencode/skills/gearcore/` and auto-detects `opencode` on PATH
+- Parallel MCP backend startup with per-backend timeout and failure tracking;
+  one slow or OAuth-blocked backend no longer delays the hub (contract locked
+  by regression tests)
 - Level-0 skill reveal: `disclosure.core_skills` now also embeds a default-skills
   section into the synced self-skill and inlines full instructions in
   `gearcore list-skills` (spec: docs/superpowers/specs/2026-07-07-level0-skill-reveal-design.md)
+- Project landing page at https://blinkvoid.github.io/GearCore/
+
+### Changed
+- `gearcore status` caches upstream version lookups for 10 minutes instead of
+  hitting the network on every invocation
 
 ## [2.1.0] - 2026-05-01
 
