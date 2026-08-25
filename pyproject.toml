@@ -3,7 +3,16 @@ name = "gearcore"
 version = "2.2.0"
 description = "Unified skill and MCP hub with layered project-scoped configuration"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["mcp", "ai-tools", "claude", "codex", "opencode", "skills", "context-window", "developer-tools"]
 requires-python = ">=3.13"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+]
 dependencies = [
     "anyio>=4.12.1",
     # mcp 2.0 removed the low-level Server.list_tools()/call_tool() decorator
