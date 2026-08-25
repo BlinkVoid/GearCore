@@ -81,7 +81,15 @@ geracore add-mcp --id playwright --type stdio \
 geracore add-skill /path/to/my-skill
 ```
 
-### 4. See what's available
+### 4. Or onboard a whole core package
+
+```bash
+gearcore onboard /path/to/core
+```
+
+Discovers `skills/*/SKILL.md` and MCP scripts in `pyproject.toml`, then registers what is found.
+
+### 5. See what's available
 
 ```bash
 geracore list-skills
@@ -179,6 +187,7 @@ list_tools → now includes browser_navigate, browser_click, ...
 | `gearcore serve` | Run the MCP hub (used automatically by AI tools) |
 | `gearcore add-mcp` | Register a new MCP server (`--scope project` for a project-local def, add `--allowlist` to allowlist an existing global server instead) |
 | `gearcore add-skill <path>` | Register a skill bundle |
+| `gearcore onboard <core-path>` | Discover and register MCP servers and/or skills from a core package |
 | `gearcore add-cli <program>` | Wrap a CLI program into a skill |
 | `gearcore remove mcp\|skill <name>` | Remove an MCP or skill |
 | `gearcore sync` | Install self-skill to Claude / Codex / Kimi / OpenCode |

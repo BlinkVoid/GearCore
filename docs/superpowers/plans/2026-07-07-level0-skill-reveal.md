@@ -765,7 +765,7 @@ Keep any existing `disclosure.strategy` / `activation_threshold` / other keys.
 The installed tool is a non-editable uv install from this directory; it must be rebuilt:
 
 ```bash
-uv tool install --reinstall ~/workspace/GearCore
+uv tool install --reinstall ~/src/gearcore
 gearcore sync
 ```
 

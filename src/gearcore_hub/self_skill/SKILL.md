@@ -82,6 +82,9 @@ globally will not appear when working in a backend API project that hasn't allow
 # Register a new MCP server (global)
 gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
 
+# Onboard a whole core package (register discovered MCP servers and/or skills)
+gearcore onboard <path-to-core> [--scope global|project]
+
 # Register an existing skill bundle (global or project)
 gearcore --project /path/to/project add-skill /path/to/skill --scope project
 
