@@ -13,6 +13,7 @@ Subcommands:
   add-cli        Wrap a CLI program into a skill via CLI-Anything
   remove         Remove an MCP server or skill
   sync           Install/update the GearCore self-skill on AI CLI tools
+  onboard        Discover and register MCP servers and/or skills from a core package
 
 Usage:
   gearcore [--project <path>] list-skills
@@ -24,6 +25,7 @@ Usage:
   gearcore add-cli <program> [--scope global|project]
   gearcore remove mcp <id> | skill <name> [--scope global|project]
   gearcore sync [--tool claude|codex|kimi|opencode] [--dry-run] [--remove]
+  gearcore onboard <core-path> [--scope global|project]
   gearcore status
 """
 
@@ -43,6 +45,7 @@ from mcp.types import TextContent, Tool
 
 from gearcore_hub.config import EffectiveConfig, load_config
 from gearcore_hub.conflict_resolver import ConflictResolver
+from gearcore_hub.onboard import cmd_onboard
 from gearcore_hub.process_manager import ProcessManager, SharedMCPServer
 from gearcore_hub.render import render_skill_instructions
 from gearcore_hub.skill_manager import SkillManager
@@ -292,9 +295,7 @@ def cmd_list_skills(config: EffectiveConfig):
 
     # Level-0 skills: reveal full instructions inline, before the listing.
     level0 = [
-        name
-        for name in config.disclosure.core_skills
-        if name in sm.visible_skill_names
+        name for name in config.disclosure.core_skills if name in sm.visible_skill_names
     ]
     for name in level0:
         bundle = sm.skills[name]
@@ -507,6 +508,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--dry-run", action="store_true")
     p_sync.add_argument("--remove", action="store_true", help="Unlink from all tools")
 
+    # onboard
+    p_onboard = sub.add_parser(
+        "onboard",
+        help="Discover and register MCP servers and/or skills from a core package",
+    )
+    p_onboard.add_argument("core_path", help="Path to the core directory")
+    p_onboard.add_argument("--scope", default="global", choices=["global", "project"])
+    p_onboard.add_argument(
+        "--mcp-id",
+        help="Explicit MCP id (defaults to single skill name or script-derived name)",
+    )
+    p_onboard.add_argument(
+        "--mcp-script",
+        help="Explicit MCP script name from [project.scripts] (required if ambiguous)",
+    )
+    p_onboard.add_argument(
+        "--copy-skills",
+        action="store_true",
+        help="Copy skill bundles (default: symlink)",
+    )
+    p_onboard.add_argument("--dry-run", action="store_true")
+    p_onboard.add_argument(
+        "--tool",
+        nargs="*",
+        metavar="TOOL",
+        help="Specific tools to sync after onboarding (claude|codex|kimi|opencode).",
+    )
+    p_onboard.add_argument(
+        "--no-sync", action="store_true", help="Skip sync after onboarding"
+    )
+
     # update-superpowers
     p_update_sp = sub.add_parser(
         "update-superpowers",
@@ -516,6 +548,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show whether an update is available without writing files",
+    )
+
+    # update
+    p_update = sub.add_parser(
+        "update",
+        help="Refresh registered MCP servers, skills, superpowers, and self-skill sync",
+    )
+    p_update.add_argument(
+        "resource",
+        nargs="?",
+        choices=["mcp", "skill", "superpowers"],
+        help="Resource type to update",
+    )
+    p_update.add_argument(
+        "name",
+        nargs="?",
+        help="MCP server id or skill name (only when resource is specified)",
+    )
+    p_update.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show pending changes without applying",
+    )
+    p_update.add_argument(
+        "--source-path",
+        type=Path,
+        help="Override source path for mcp/skill update",
     )
 
     return parser
@@ -664,6 +723,16 @@ def main():
             upstream = result["upstream"]
             upstream_short = upstream[:12] if len(upstream) >= 12 else upstream
             print(f"superpowers is up to date ({upstream_short})")
+        return
+
+    if command == "update":
+        from gearcore_hub.update import cmd_update
+
+        cmd_update(config, args)
+        return
+
+    if command == "onboard":
+        cmd_onboard(args, project_path)
         return
 
     parser.print_help()
