@@ -43,13 +43,26 @@ exact token costs depend on each client's MCP schema serialization.*
 - **⚔️ Conflict resolution** — When multiple MCP servers expose the same tool name, GearCore deduplicates, namespaces, or unifies them automatically.
 - **🔄 One sync to all tools** — `gearcore sync` installs the self-skill into Claude, Codex, Kimi, and OpenCode in one command.
 
+## Client support
+
+Verified end-to-end on 2026-08-25: `gearcore sync` installs the self-skill into each client's
+skill-discovery directory (symlink to a canonical copy), the link resolves, and the skill loads.
+The MCP hub handshake was verified with a live stdio client (`verify_hub.py`).
+
+| Client | Install target | Discovery | Hub handshake |
+|---|---|---|---|
+| Claude Code | `~/.claude/skills/gearcore` | ✅ | ✅ |
+| Codex CLI | `~/.codex/skills/gearcore` | ✅ | ✅ |
+| Kimi CLI | `~/.kimi/skills/gearcore` | ✅ | ✅ |
+| OpenCode | `~/.config/opencode/skills/gearcore` | ✅ | ✅ |
+
 ## Installation
 
 Requires **Python 3.13+** and **[uv](https://docs.astral.sh/uv/)**.
 
 ```bash
 # Install from a local clone (primary path today; no public release yet)
-git clone <repo-url> && cd GearCore
+git clone https://github.com/BlinkVoid/GearCore.git && cd GearCore
 uv tool install .
 
 # Install the self-skill into Claude, Codex, Kimi, OpenCode
@@ -269,7 +282,7 @@ See [SKILL_SCHEMA.md](SKILL_SCHEMA.md) for the full specification.
 
 ```bash
 # Clone
-git clone <repo-url>
+git clone https://github.com/BlinkVoid/GearCore.git
 cd GearCore
 
 # Install in editable mode
