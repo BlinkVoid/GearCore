@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `gearcore update` command with version-aware refresh for MCP servers,
+  skill bundles, and superpowers, followed by self-skill re-sync
+- `gearcore onboard` command: discovers MCP scripts and skill bundles in a
+  core package directory and registers them in one step
 - `gearcore sync` now targets OpenCode: symlinks the self-skill into
   `~/.config/opencode/skills/gearcore/` and auto-detects `opencode` on PATH
 - Level-0 skill reveal: `disclosure.core_skills` now also embeds a default-skills

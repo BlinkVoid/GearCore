@@ -89,7 +89,21 @@ gearcore onboard /path/to/core
 
 Discovers `skills/*/SKILL.md` and MCP scripts in `pyproject.toml`, then registers what is found.
 
-### 5. See what's available
+### 5. Updating resources
+
+```bash
+# Update everything (MCP servers, skills, superpowers, self-skill sync)
+gearcore update
+
+# Update a single MCP server or skill
+gearcore update mcp sample-prompts
+gearcore update skill memory
+
+# Preview changes without applying
+gearcore update --dry-run
+```
+
+### 6. See what's available
 
 ```bash
 geracore list-skills
@@ -99,7 +113,7 @@ geracore list-skills
 #   memory — Persistent memory via SampleMemory
 ```
 
-### 5. AI tools use it
+### 7. AI tools use it
 
 Once synced, Kimi/Claude/Codex/OpenCode loads GearCore as a skill and follows this flow:
 
@@ -191,6 +205,7 @@ list_tools → now includes browser_navigate, browser_click, ...
 | `gearcore add-cli <program>` | Wrap a CLI program into a skill |
 | `gearcore remove mcp\|skill <name>` | Remove an MCP or skill |
 | `gearcore sync` | Install self-skill to Claude / Codex / Kimi / OpenCode |
+| `gearcore update [mcp\|skill\|superpowers] [name]` | Version-aware refresh of registered resources, then re-sync |
 
 All commands accept `--project <path>` for project-scoped context and `-v` for verbose output.
 
