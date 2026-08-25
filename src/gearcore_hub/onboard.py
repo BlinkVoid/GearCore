@@ -1,0 +1,506 @@
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import filecmp
+import logging
+import os
+import tomllib
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from gearcore_hub.sync import sync
+
+logger = logging.getLogger("gearcore.onboard")
+
+
+@dataclasses.dataclass(frozen=True)
+class SkillBundleCandidate:
+    name: str
+    path: Path
+
+
+@dataclasses.dataclass(frozen=True)
+class OnboardStep:
+    action: str
+    target: str
+    detail: str
+
+
+@dataclasses.dataclass
+class OnboardPlan:
+    core_path: Path
+    scope: str
+    project_root: Path | None
+    mcp_script: str | None
+    mcp_id: str | None
+    mcp_command: str | None
+    mcp_action: str
+    skill_actions: list[tuple[SkillBundleCandidate, str]]
+    copy_skills: bool
+    dry_run: bool
+    tool_filter: list[str] | None
+    no_sync: bool
+    mcp_existing: dict[str, Any] | None = None
+
+
+def discover_skill_bundles(core_path: Path) -> list[SkillBundleCandidate]:
+    candidates: list[SkillBundleCandidate] = []
+    skills_root = core_path / "skills"
+    if skills_root.is_dir():
+        for entry in sorted(skills_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            if (entry / "SKILL.md").exists():
+                candidates.append(
+                    SkillBundleCandidate(name=_extract_skill_name(entry), path=entry)
+                )
+
+    if (core_path / "SKILL.md").exists():
+        candidates.append(
+            SkillBundleCandidate(name=_extract_skill_name(core_path), path=core_path)
+        )
+
+    return candidates
+
+
+def discover_mcp_scripts(core_path: Path) -> list[str]:
+    path = core_path / "pyproject.toml"
+    if not path.exists():
+        return []
+
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse {path}: {exc}") from exc
+
+    scripts = data.get("project", {}).get("scripts", {})
+    if not isinstance(scripts, dict):
+        return []
+    return sorted(
+        name
+        for name in scripts
+        if isinstance(name, str) and (name.endswith("-mcp") or name.endswith("_mcp"))
+    )
+
+
+def select_mcp_script(scripts: list[str], requested_script: str | None = None) -> str:
+    if requested_script is None:
+        if len(scripts) == 1:
+            return scripts[0]
+        if not scripts:
+            raise ValueError("No MCP script candidates discovered.")
+        raise ValueError(
+            "Multiple MCP script candidates discovered: "
+            + ", ".join(scripts)
+            + ". Use --mcp-script to choose one."
+        )
+    if requested_script not in scripts:
+        raise ValueError(
+            f"Requested MCP script '{requested_script}' not found. Candidates: {', '.join(scripts)}"
+        )
+    return requested_script
+
+
+def derive_mcp_id(
+    skill_bundles: list[SkillBundleCandidate],
+    mcp_script: str,
+    explicit_id: str | None = None,
+) -> str:
+    if explicit_id:
+        return explicit_id
+    if len(skill_bundles) == 1:
+        return skill_bundles[0].name
+    for suffix in ("-mcp", "_mcp"):
+        if mcp_script.endswith(suffix):
+            return mcp_script[: -len(suffix)]
+    return mcp_script
+
+
+def mcp_command(core_path: Path, mcp_script: str) -> str:
+    local_exec = core_path / ".venv" / "bin" / mcp_script
+    if local_exec.is_file() and os.access(local_exec, os.X_OK):
+        return str(local_exec)
+    return mcp_script
+
+
+def build_onboard_plan(
+    core_path: Path,
+    *,
+    scope: str = "global",
+    project_root: Path | None = None,
+    mcp_script: str | None = None,
+    mcp_id: str | None = None,
+    copy_skills: bool = False,
+    tool_filter: list[str] | None = None,
+    no_sync: bool = False,
+) -> OnboardPlan:
+    core_path = core_path.resolve()
+    skill_bundles = discover_skill_bundles(core_path)
+    skill_names = Counter(bundle.name for bundle in skill_bundles)
+    duplicate_names = sorted(name for name, count in skill_names.items() if count > 1)
+    if duplicate_names:
+        raise ValueError(
+            "Duplicate skill names discovered: " + ", ".join(duplicate_names)
+        )
+    scripts = discover_mcp_scripts(core_path)
+    if not skill_bundles and not scripts:
+        raise ValueError(f"No skill bundles or MCP scripts discovered in {core_path}.")
+    if not scripts and (mcp_script is not None or mcp_id is not None):
+        raise ValueError(
+            "Cannot use --mcp-script or --mcp-id: no MCP scripts ending -mcp/_mcp "
+            f"were discovered in {core_path}/pyproject.toml."
+        )
+
+    selected_script: str | None = None
+    selected_id: str | None = None
+    selected_command: str | None = None
+    mcp_action = "none"
+    mcp_existing: dict[str, Any] | None = None
+    if scripts:
+        selected_script = select_mcp_script(scripts, requested_script=mcp_script)
+        selected_id = derive_mcp_id(skill_bundles, selected_script, explicit_id=mcp_id)
+        selected_command = mcp_command(core_path, selected_script)
+        mcp_action, mcp_existing = _plan_mcp_registration(
+            scope=scope,
+            project_root=project_root,
+            mcp_id=selected_id,
+            command=selected_command,
+        )
+    skill_actions = _plan_skills(
+        scope=scope,
+        project_root=project_root,
+        skill_bundles=skill_bundles,
+    )
+
+    if mcp_action == "conflict":
+        raise ValueError(f"Conflicting MCP entry for '{selected_id}': {mcp_existing}")
+    conflicts = [name.name for name, action in skill_actions if action == "conflict"]
+    if conflicts:
+        raise ValueError(
+            "Skill destination conflicts: "
+            + ", ".join(conflicts)
+            + ". Remove/rename those destinations before onboarding."
+        )
+
+    return OnboardPlan(
+        core_path=core_path.resolve(),
+        scope=scope,
+        project_root=project_root,
+        mcp_script=selected_script,
+        mcp_id=selected_id,
+        mcp_command=selected_command,
+        mcp_action=mcp_action,
+        skill_actions=skill_actions,
+        copy_skills=copy_skills,
+        dry_run=False,
+        tool_filter=tool_filter,
+        no_sync=no_sync,
+        mcp_existing=mcp_existing,
+    )
+
+
+def run_onboard(
+    core_path: Path,
+    *,
+    scope: str = "global",
+    project_root: Path | None = None,
+    mcp_script: str | None = None,
+    mcp_id: str | None = None,
+    copy_skills: bool = False,
+    dry_run: bool = False,
+    tool_filter: list[str] | None = None,
+    no_sync: bool = False,
+) -> list[OnboardStep]:
+    plan = build_onboard_plan(
+        core_path,
+        scope=scope,
+        project_root=project_root,
+        mcp_script=mcp_script,
+        mcp_id=mcp_id,
+        copy_skills=copy_skills,
+        tool_filter=tool_filter,
+        no_sync=no_sync,
+    )
+
+    if dry_run:
+        return [
+            OnboardStep(
+                action="plan",
+                target="dry-run",
+                detail=_format_plan(plan),
+            )
+        ]
+
+    steps = apply_plan(plan)
+    if not plan.no_sync:
+        sync(tools=plan.tool_filter, dry_run=False, remove=False)
+    return steps
+
+
+def apply_plan(plan: OnboardPlan) -> list[OnboardStep]:
+    steps: list[OnboardStep] = []
+
+    skills_root = _skills_root(plan.scope, plan.project_root)
+
+    if plan.mcp_action == "add":
+        assert plan.mcp_id is not None and plan.mcp_command is not None
+        _write_mcp_entry(
+            scope=plan.scope,
+            project_root=plan.project_root,
+            mcp_id=plan.mcp_id,
+            command=plan.mcp_command,
+        )
+        steps.append(
+            OnboardStep(
+                action="mcp",
+                target=plan.mcp_id,
+                detail=f"registered MCP '{plan.mcp_id}' from {plan.mcp_script}",
+            )
+        )
+    elif plan.mcp_action == "skip":
+        assert plan.mcp_id is not None
+        steps.append(
+            OnboardStep(
+                action="mcp",
+                target=plan.mcp_id,
+                detail=f"skipped MCP '{plan.mcp_id}' (already matches)",
+            )
+        )
+
+    for bundle, action in plan.skill_actions:
+        dest = skills_root / bundle.name
+        if action == "add":
+            if plan.copy_skills:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil_copytree(bundle.path, dest)
+                detail = f"copied skill '{bundle.name}' to {dest}"
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.symlink_to(bundle.path)
+                detail = f"symlinked skill '{bundle.name}' to {dest}"
+            steps.append(OnboardStep(action="skill", target=bundle.name, detail=detail))
+        else:
+            steps.append(
+                OnboardStep(
+                    action="skill",
+                    target=bundle.name,
+                    detail=f"skipped skill '{bundle.name}' (already matches)",
+                )
+            )
+    return steps
+
+
+def cmd_onboard(args: argparse.Namespace, project_path: Path | None) -> None:
+    try:
+        steps = run_onboard(
+            core_path=Path(args.core_path),
+            scope=args.scope,
+            project_root=project_path,
+            mcp_script=args.mcp_script,
+            mcp_id=args.mcp_id,
+            copy_skills=args.copy_skills,
+            dry_run=args.dry_run,
+            tool_filter=args.tool,
+            no_sync=args.no_sync,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        raise SystemExit(1) from exc
+
+    for step in steps:
+        print(step.detail)
+
+
+def _format_plan(plan: OnboardPlan) -> str:
+    lines = [
+        "Plan: onboarding core",
+        f"  Core path: {plan.core_path}",
+    ]
+    if plan.mcp_action == "none":
+        lines.append("  MCP: none discovered")
+    else:
+        lines.extend(
+            [
+                f"  MCP script: {plan.mcp_script}",
+                f"  MCP id: {plan.mcp_id}",
+                f"  MCP command: {plan.mcp_command}",
+                "  MCP action: add"
+                if plan.mcp_action == "add"
+                else "  MCP action: skip (already registered)",
+            ]
+        )
+
+    lines.append("  Skills:")
+    for bundle, action in plan.skill_actions:
+        lines.append(f"    - {bundle.name}: {action}")
+
+    if plan.no_sync:
+        lines.append("  Sync: skipped (--no-sync)")
+    elif plan.tool_filter:
+        lines.append("  Sync targets: " + ", ".join(plan.tool_filter))
+    else:
+        lines.append("  Sync targets: auto-detect")
+    return "\n".join(lines)
+
+
+def _extract_skill_name(skill_path: Path) -> str:
+    text = (skill_path / "SKILL.md").read_text(encoding="utf-8")
+    if text.startswith("---\n"):
+        parts = text.split("---", 2)
+        if len(parts) >= 2:
+            frontmatter = yaml.safe_load(parts[1])
+            name = (
+                frontmatter.get("name")
+                if isinstance(frontmatter, dict)
+                else None
+            )
+            if isinstance(name, str):
+                return name
+    return skill_path.name
+
+
+def _read_yaml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _write_yaml(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(
+            data, f, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
+
+
+def _config_path(scope: str, project_root: Path | None) -> Path:
+    if scope == "project":
+        if project_root is None:
+            raise ValueError("--scope project requires --project")
+        return project_root / ".gearcore" / "config.yaml"
+    return Path.home() / ".config" / "gearcore" / "config.yaml"
+
+
+def _skills_root(scope: str, project_root: Path | None) -> Path:
+    if scope == "project":
+        if project_root is None:
+            raise ValueError("--scope project requires --project")
+        return project_root / ".gearcore" / "skills"
+    return Path.home() / ".config" / "gearcore" / "skills"
+
+
+def _normalize_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    data = {
+        "id": entry.get("id"),
+        "type": entry.get("type", "stdio"),
+        "enabled": entry.get("enabled", True),
+    }
+    if data["type"] == "stdio":
+        data["command"] = entry.get("command", "")
+        if entry.get("args"):
+            data["args"] = entry["args"]
+        if entry.get("env"):
+            data["env"] = entry["env"]
+    else:
+        data["url"] = entry.get("url", "")
+    return data
+
+
+def _plan_mcp_registration(
+    scope: str,
+    project_root: Path | None,
+    mcp_id: str,
+    command: str,
+) -> tuple[str, dict[str, Any] | None]:
+    data = _read_yaml(_config_path(scope, project_root))
+    registry_section = data.setdefault("registry", {})
+    servers = registry_section.setdefault("mcp_servers", [])
+    existing = next((s for s in servers if s.get("id") == mcp_id), None)
+    if existing is None:
+        return "add", None
+    expected = {"id": mcp_id, "type": "stdio", "command": command, "enabled": True}
+    if _normalize_mcp_entry(existing) == expected:
+        return "skip", existing
+    return "conflict", existing
+
+
+def _plan_skills(
+    scope: str,
+    project_root: Path | None,
+    skill_bundles: list[SkillBundleCandidate],
+) -> list[tuple[SkillBundleCandidate, str]]:
+    skills_root = _skills_root(scope, project_root)
+    out: list[tuple[SkillBundleCandidate, str]] = []
+    for bundle in skill_bundles:
+        dest = skills_root / bundle.name
+        if not dest.exists() and not dest.is_symlink():
+            out.append((bundle, "add"))
+            continue
+        if _is_skill_equivalent(bundle.path, dest):
+            out.append((bundle, "skip"))
+            continue
+        out.append((bundle, "conflict"))
+    return out
+
+
+def _is_skill_equivalent(source: Path, dest: Path) -> bool:
+    try:
+        source_resolved = source.resolve()
+    except FileNotFoundError:
+        return False
+
+    if not dest.exists():
+        return False
+
+    if dest.is_symlink():
+        try:
+            return dest.resolve() == source_resolved
+        except OSError:
+            return False
+    return dest.is_dir() and _dirs_equal(source, dest)
+
+
+def _dirs_equal(left: Path, right: Path) -> bool:
+    cmp = filecmp.dircmp(left, right, ignore=[".git"])
+    if cmp.left_only or cmp.right_only or cmp.funny_files or cmp.common_funny:
+        return False
+    if cmp.diff_files:
+        return False
+    for filename in cmp.common_files:
+        if not filecmp.cmp(left / filename, right / filename, shallow=False):
+            return False
+    return all(_dirs_equal(Path(sub.left), Path(sub.right)) for sub in cmp.subdirs.values())
+
+
+def _write_mcp_entry(
+    scope: str,
+    project_root: Path | None,
+    mcp_id: str,
+    command: str,
+) -> None:
+    path = _config_path(scope, project_root)
+    data = _read_yaml(path)
+    registry_section = data.setdefault("registry", {})
+    servers = registry_section.setdefault("mcp_servers", [])
+    entry = {"id": mcp_id, "type": "stdio", "command": command, "enabled": True}
+    for idx, existing in enumerate(servers):
+        if existing.get("id") == mcp_id:
+            servers[idx] = entry
+            _write_yaml(path, data)
+            return
+    servers.append(entry)
+    _write_yaml(path, data)
+
+
+def shutil_copytree(source: Path, dest: Path) -> None:
+    import shutil
+
+    if dest.exists():
+        raise FileExistsError(f"Cannot copy to existing destination {dest}")
+    shutil.copytree(source, dest)
