@@ -10,6 +10,7 @@ from gearcore_hub.update import (
     get_manifest_version,
     infer_mcp_source_path,
     update_mcp_server,
+    update_skill,
 )
 
 
@@ -139,3 +140,40 @@ def test_update_mcp_server_dry_run(tmp_path: Path):
         assert "Would update" in result["message"]
         mock_remove.assert_not_called()
         mock_add.assert_not_called()
+
+
+def test_update_skill_up_to_date(tmp_path: Path):
+    skill_src = tmp_path / "demo-skill"
+    skill_src.mkdir()
+    (skill_src / "SKILL.md").write_text("# demo")
+    (skill_src / "manifest.json").write_text('{"version": "1.0.0"}')
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    (skills_dir / "demo-skill").symlink_to(skill_src)
+
+    config = MagicMock()
+    config.skills_dirs = [skills_dir]
+    config.project_root = None
+
+    # First update to record metadata
+    update_skill("demo-skill", config)
+    # Second update should be no-op
+    result = update_skill("demo-skill", config)
+    assert result["changed"] is False
+    assert "up to date" in result["message"]
+
+
+def test_update_skill_source_unknown(tmp_path: Path):
+    skill_dir = tmp_path / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# demo")
+    (skill_dir / "manifest.json").write_text('{"version": "1.0.0"}')
+
+    config = MagicMock()
+    config.skills_dirs = [tmp_path / "skills"]
+    config.project_root = None
+
+    result = update_skill("demo-skill", config)
+    assert result["changed"] is False
+    assert "unknown" in result["message"].lower() or "source" in result["message"].lower()

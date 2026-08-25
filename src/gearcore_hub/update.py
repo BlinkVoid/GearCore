@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -218,4 +219,132 @@ def update_all_mcp_servers(config, *, dry_run: bool = False) -> list[dict]:
     for server in config.mcp_servers:
         result = update_mcp_server(config, server.id, dry_run=dry_run)
         results.append(result)
+    return results
+
+
+def _skill_update_metadata_path(skills_dir: Path, name: str) -> Path:
+    return skills_dir / f".{name}.gearcore-update.json"
+
+
+def _load_skill_update_metadata(skills_dir: Path, name: str) -> dict[str, Any]:
+    path = _skill_update_metadata_path(skills_dir, name)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            logger.debug("Failed to read update metadata for %s: %s", name, exc)
+    return {}
+
+
+def _save_skill_update_metadata(
+    skills_dir: Path, name: str, metadata: dict[str, Any]
+) -> None:
+    path = _skill_update_metadata_path(skills_dir, name)
+    path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+
+def _find_installed_skill(name: str, config) -> Path | None:
+    """Find installed skill directory by name across skills_dirs."""
+    for directory in config.skills_dirs:
+        candidate = Path(directory) / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def update_skill(
+    name: str,
+    config,
+    *,
+    dry_run: bool = False,
+    source_path: Path | None = None,
+) -> dict:
+    """Refresh a skill bundle if its source manifest/git version changed.
+
+    For symlinked skills, *source_path* defaults to the symlink target.
+    For copied skills, the original source is unknown; pass --source-path
+    or the skill will be reported as "source unknown".
+    """
+    installed = _find_installed_skill(name, config)
+    if installed is None:
+        return {
+            "name": name,
+            "changed": False,
+            "message": f"Skill '{name}' not found in any skills dir.",
+        }
+
+    # Determine the authoritative source path
+    src = source_path
+    if src is None and installed.is_symlink():
+        src = installed.readlink().resolve()
+    if src is None:
+        return {
+            "name": name,
+            "changed": False,
+            "message": (
+                f"Source of copied skill '{name}' unknown; "
+                "pass --source-path to enable updates."
+            ),
+        }
+
+    manifest = load_skill_manifest(installed)
+    version = manifest.get("version") if manifest else None
+    git_rev = get_git_revision(src) if src else None
+
+    # Find the skills_dir that owns this installation
+    skills_dir = next(Path(d) for d in config.skills_dirs if (Path(d) / name).exists())
+    previous = _load_skill_update_metadata(skills_dir, name)
+    current = {"version": version, "revision": git_rev}
+
+    if previous == current and current != {"version": None, "revision": None}:
+        return {
+            "name": name,
+            "changed": False,
+            "message": f"Skill '{name}' is up to date ({version or git_rev}).",
+        }
+
+    if dry_run:
+        return {
+            "name": name,
+            "changed": True,
+            "message": f"Would update skill '{name}'.",
+        }
+
+    try:
+        if installed.is_symlink():
+            installed.unlink()
+            installed.symlink_to(src)
+        else:
+            shutil.rmtree(installed)
+            shutil.copytree(src, installed)
+        _save_skill_update_metadata(skills_dir, name, current)
+    except Exception as exc:
+        return {
+            "name": name,
+            "changed": False,
+            "message": f"Failed to update skill '{name}': {exc}",
+        }
+
+    return {
+        "name": name,
+        "changed": True,
+        "message": f"Updated skill '{name}'.",
+    }
+
+
+def update_all_skills(config, *, dry_run: bool = False) -> list[dict]:
+    """Update all skill bundles found in the active skills_dirs."""
+    results = []
+    seen: set[str] = set()
+    for directory in config.skills_dirs:
+        directory = Path(directory)
+        if not directory.exists():
+            continue
+        for entry in sorted(directory.iterdir()):
+            if entry.is_dir() and not entry.name.startswith("."):
+                if entry.name in seen:
+                    continue
+                seen.add(entry.name)
+                results.append(update_skill(entry.name, config, dry_run=dry_run))
     return results
