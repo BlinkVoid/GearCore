@@ -6,6 +6,8 @@
 
 **One skill to rule them all.**
 
+> 🌐 [Project website](https://blinkvoid.github.io/GearCore/)
+
 GearCore is a unified skill and MCP hub that aggregates all your AI tools behind a single, progressively-disclosed interface. Instead of copying the same MCP server configs into Claude, Codex, Kimi, and every new project, you register everything **once** in GearCore and expose it as one native skill that every AI CLI tool discovers automatically.
 
 ```

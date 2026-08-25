@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GearCore — One skill to rule them all: a unified MCP &amp; skill hub for AI CLIs</title>
+<meta name="description" content="GearCore aggregates your MCP servers and skills behind one progressively-disclosed skill for Claude Code, Codex, Kimi, and OpenCode. Register once, sync everywhere, keep context windows lean.">
+<link rel="canonical" href="https://blinkvoid.github.io/GearCore/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="GearCore — One skill to rule them all">
+<meta property="og:description" content="A unified MCP and skill hub for AI CLI tools. Register MCP servers once, expose them as a native skill everywhere.">
+<meta property="og:url" content="https://blinkvoid.github.io/GearCore/">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#0b1020">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "GearCore",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS",
+  "description": "Unified skill and MCP hub that aggregates AI tools behind a single, progressively-disclosed interface for Claude Code, Codex, Kimi, and OpenCode.",
+  "url": "https://blinkvoid.github.io/GearCore/",
+  "codeRepository": "https://github.com/BlinkVoid/GearCore",
+  "license": "https://opensource.org/licenses/MIT"
+}
+</script>
+<style>
+  :root {
+    --bg: #0b1020;
+    --bg-soft: #111832;
+    --card: #151d3b;
+    --border: #26305c;
+    --text: #e6ebff;
+    --muted: #9aa7d0;
+    --accent: #7c9bff;
+    --accent-2: #4ade80;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header.site {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(11,16,32,.85); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+  header.site .wrap { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .logo { font-weight: 700; font-size: 1.1rem; color: var(--text); }
+  .logo span { color: var(--accent); }
+  nav a { margin-left: 22px; color: var(--muted); font-size: .95rem; }
+  nav a:hover { color: var(--text); }
+
+  .hero { padding: 84px 0 64px; text-align: center; position: relative; overflow: hidden; }
+  .hero::before {
+    content: ""; position: absolute; inset: -40% -20% auto;
+    height: 480px;
+    background: radial-gradient(closest-side, rgba(124,155,255,.18), transparent);
+    pointer-events: none;
+  }
+  .hero h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); line-height: 1.15; letter-spacing: -.02em; }
+  .hero h1 em { font-style: normal; background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .hero p.sub { max-width: 720px; margin: 18px auto 30px; color: var(--muted); font-size: 1.15rem; }
+  .cta { display: inline-flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+  .btn {
+    padding: 11px 22px; border-radius: 10px; font-weight: 600; font-size: .98rem;
+    border: 1px solid var(--border); color: var(--text);
+  }
+  .btn.primary { background: linear-gradient(135deg, #5b7cfa, #7c9bff); border-color: transparent; color: #fff; }
+  .btn.primary:hover { filter: brightness(1.08); text-decoration: none; }
+  .btn:hover { text-decoration: none; border-color: var(--accent); }
+
+  section { padding: 56px 0; }
+  h2 { font-size: 1.7rem; letter-spacing: -.01em; margin-bottom: 10px; }
+  .kicker { color: var(--accent-2); font-size: .85rem; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; }
+  p.lead { color: var(--muted); max-width: 760px; margin-bottom: 28px; }
+
+  pre {
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px; overflow-x: auto; font-family: var(--mono); font-size: .88rem; line-height: 1.55;
+  }
+  pre .c { color: #5f6f9f; } pre .p { color: var(--accent-2); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px;
+  }
+  .card h3 { font-size: 1.05rem; margin-bottom: 8px; }
+  .card p { color: var(--muted); font-size: .93rem; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--border); font-size: .95rem; }
+  th { color: var(--muted); font-weight: 600; background: var(--bg-soft); }
+  tr:last-child td { border-bottom: none; }
+  td.ok { color: var(--accent-2); font-weight: 700; }
+
+  footer.site { border-top: 1px solid var(--border); padding: 34px 0; color: var(--muted); font-size: .9rem; }
+  footer.site .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <div class="logo">⚙ Gear<span>Core</span></div>
+    <nav>
+      <a href="#why">Why</a>
+      <a href="#install">Install</a>
+      <a href="#clients">Clients</a>
+      <a href="https://github.com/BlinkVoid/GearCore">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <h1>One skill to <em>rule them all.</em></h1>
+      <p class="sub">GearCore is a unified skill &amp; MCP hub for AI CLIs. Register your MCP servers
+      and skills <strong>once</strong>, expose them as a single native skill in Claude&nbsp;Code,
+      Codex, Kimi, and OpenCode — and keep every context window lean.</p>
+      <div class="cta">
+        <a class="btn primary" href="#install">Get started</a>
+        <a class="btn" href="https://github.com/BlinkVoid/GearCore">View source ↗</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="why">
+    <div class="wrap">
+      <span class="kicker">The problem</span>
+      <h2>MCP config sprawl doesn't scale</h2>
+      <p class="lead">Every AI tool wants its own copy of the same server configs. Every project repeats them.
+      Contexts bloat, configs drift, and nothing stays in sync.</p>
+      <pre><span class="c"># Without GearCore</span>
+Claude:   12 servers × schema tokens, copied into every project
+Codex:    same configs, copied again
+Kimi:     same configs, copied again
+
+<span class="c"># With GearCore</span>
+Claude → gearcore → request_skill("web-research")
+Kimi   → gearcore → request_skill("filesystem")
+Codex  → gearcore → request_skill("memory")</pre>
+    </div>
+  </section>
+
+  <section style="padding-top: 0;">
+    <div class="wrap grid">
+      <div class="card"><h3>🎭 Native skill</h3><p>AI tools discover <code>gearcore</code> through their own skill mechanism. No per-tool config duplication, no plugins to install.</p></div>
+      <div class="card"><h3>🔒 Progressive disclosure</h3><p>Backend tools stay hidden until you explicitly unlock a bundle with <code>request_skill</code>. Context stays clean by default.</p></div>
+      <div class="card"><h3>📁 Project scoping</h3><p>Each repo can allowlist exactly the skills it needs via <code>.gearcore/config.yaml</code>. Global power, local discipline.</p></div>
+      <div class="card"><h3>⓪ Level-0 skills</h3><p>Mark core skills to be revealed by default — full instructions inline in <code>list-skills</code>, embedded at sync time.</p></div>
+      <div class="card"><h3>⚔️ Conflict resolution</h3><p>Same tool name from multiple backends? GearCore deduplicates, namespaces, or unifies automatically.</p></div>
+      <div class="card"><h3>🔄 One-command updates</h3><p><code>gearcore update</code> refreshes MCP servers, skill bundles, vendored skills, and re-syncs everything — version-aware, with dry-run.</p></div>
+    </div>
+  </section>
+
+  <section id="install" style="background: var(--bg-soft); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+    <div class="wrap">
+      <span class="kicker">Install</span>
+      <h2>Up and running in two commands</h2>
+      <p class="lead">Requires Python 3.13+ and <a href="https://docs.astral.sh/uv/">uv</a>.</p>
+<pre><span class="c"># 1. Install the CLI from a clone</span>
+git clone https://github.com/BlinkVoid/GearCore.git && cd GearCore
+uv tool install .
+
+<span class="c"># 2. Sync the self-skill to every detected AI CLI</span>
+gearcore sync
+
+<span class="c"># Register an MCP server once…</span>
+gearcore add-mcp --id filesystem --type stdio \
+  --command npx --args -y @modelcontextprotocol/server-filesystem ~/workspace
+
+<span class="c"># …and check what your tools will see</span>
+gearcore status
+gearcore list-skills</pre>
+    </div>
+  </section>
+
+  <section id="clients">
+    <div class="wrap">
+      <span class="kicker">Compatibility</span>
+      <h2>Verified across four AI CLIs</h2>
+      <p class="lead">Each client gets the self-skill installed at its native discovery path,
+      verified end-to-end with live hub handshakes.</p>
+      <table>
+        <tr><th>Client</th><th>Skill install target</th><th>Discovery</th><th>Hub handshake</th></tr>
+        <tr><td>Claude Code</td><td><code>~/.claude/skills/gearcore</code></td><td class="ok">✓</td><td class="ok">✓</td></tr>
+        <tr><td>Codex CLI</td><td><code>~/.codex/skills/gearcore</code></td><td class="ok">✓</td><td class="ok">✓</td></tr>
+        <tr><td>Kimi CLI</td><td><code>~/.kimi/skills/gearcore</code></td><td class="ok">✓</td><td class="ok">✓</td></tr>
+        <tr><td>OpenCode</td><td><code>~/.config/opencode/skills/gearcore</code></td><td class="ok">✓</td><td class="ok">✓</td></tr>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <div>MIT License · GearCore</div>
+    <div><a href="https://github.com/BlinkVoid/GearCore">GitHub</a> · <a href="https://github.com/BlinkVoid/GearCore/issues">Issues</a></div>
+  </div>
+</footer>
+
+</body>
+</html>
