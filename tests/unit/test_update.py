@@ -20,9 +20,7 @@ def test_get_git_revision(tmp_path: Path):
     import subprocess
 
     def _git(*args: str) -> None:
-        subprocess.run(
-            ["git", *args], cwd=tmp_path, check=True, capture_output=True
-        )
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
 
     _git("init")
     # CI runners have no global git identity; configure it locally.

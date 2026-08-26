@@ -22,7 +22,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        # Sync from uv.lock so tool versions (ruff, mypy, pytest) are pinned
+        # and match local runs; `uv pip install` floats to latest releases.
+        run: uv sync --locked --extra dev
 
       - name: Lint with ruff
         run: |
