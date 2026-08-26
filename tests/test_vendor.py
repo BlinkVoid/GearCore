@@ -2,6 +2,7 @@
 
 import json
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -143,22 +144,46 @@ def test_sync_vendor_bundle_copies_skills_and_updates_manifest(tmp_path):
     assert updated["vendored_at"] != "2026-01-01"
 
 
-VENDORED_EXECUTABLE_SCRIPTS = [
-    "subagent-driven-development/scripts/sdd-workspace",
-    "subagent-driven-development/scripts/task-brief",
-    "subagent-driven-development/scripts/review-package",
-    "brainstorming/scripts/start-server.sh",
-    "brainstorming/scripts/stop-server.sh",
-    "systematic-debugging/find-polluter.sh",
-]
+def _shebang_scripts() -> list[Path]:
+    skills_dir = bundled_superpowers_dir()
+    if skills_dir is None:
+        return []
+    return [
+        p
+        for p in sorted(skills_dir.rglob("*"))
+        if p.is_file() and p.read_bytes()[:2] == b"#!"
+    ]
 
 
-@pytest.mark.parametrize("rel_path", VENDORED_EXECUTABLE_SCRIPTS)
-def test_vendored_scripts_are_executable(rel_path):
-    script = bundled_superpowers_dir() / rel_path
-    assert script.exists(), f"missing vendored script: {rel_path}"
-    mode = script.stat().st_mode
-    assert mode & stat.S_IXUSR, f"vendored script not executable: {rel_path}"
+def test_vendored_shebang_scripts_are_executable():
+    scripts = _shebang_scripts()
+    assert scripts, "expected at least one shebang script in the vendored bundle"
+    for script in scripts:
+        mode = script.stat().st_mode
+        assert mode & stat.S_IXUSR, f"vendored script not executable: {script.name}"
+
+
+def test_git_tracks_vendored_scripts_as_executable():
+    scripts = _shebang_scripts()
+    assert scripts, "expected at least one shebang script in the vendored bundle"
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-s", *[str(p) for p in scripts]],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30.0,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pytest.skip("not running inside a git checkout")
+    tracked = {
+        Path(line.split(maxsplit=3)[-1]): line.split()[0]
+        for line in result.stdout.splitlines()
+        if line.strip()
+    }
+    assert len(tracked) == len(scripts), "some vendored scripts are untracked"
+    for script, mode in tracked.items():
+        assert mode == "100755", f"git tracks {script} as {mode}, expected 100755"
 
 
 def test_update_superpowers_raises_when_no_manifest(tmp_path, monkeypatch):
