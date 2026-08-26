@@ -19,15 +19,18 @@ def test_get_git_revision(tmp_path: Path):
     # Initialize a git repo to get a real short SHA
     import subprocess
 
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    def _git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=tmp_path, check=True, capture_output=True
+        )
+
+    _git("init")
+    # CI runners have no global git identity; configure it locally.
+    _git("config", "user.email", "test@example.com")
+    _git("config", "user.name", "GearCore Test")
     (tmp_path / "file.txt").write_text("x")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init", "--no-gpg-sign"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
+    _git("add", ".")
+    _git("commit", "-m", "init", "--no-gpg-sign")
     sha = get_git_revision(tmp_path)
     assert sha is not None and len(sha) >= 4
 
