@@ -15,9 +15,7 @@ def _write_global(path: Path, servers: list[dict]) -> None:
 
 
 def _read_project(project_root: Path) -> dict:
-    return yaml.safe_load(
-        (project_root / ".gearcore" / "config.yaml").read_text()
-    )
+    return yaml.safe_load((project_root / ".gearcore" / "config.yaml").read_text())
 
 
 class TestAddMcpProjectAllowlist:
@@ -106,9 +104,7 @@ class TestRemoveMcpProject:
                 {
                     "scope": {"mcp_servers": {"include": ["gw"]}},
                     "registry": {
-                        "mcp_servers": [
-                            {"id": "gw", "type": "sse", "url": "http://x"}
-                        ]
+                        "mcp_servers": [{"id": "gw", "type": "sse", "url": "http://x"}]
                     },
                 }
             )
@@ -127,3 +123,42 @@ class TestRemoveMcpProject:
 
         with pytest.raises(KeyError):
             registry.remove_mcp("nope", scope="project", project_root=project)
+
+
+class TestRemoveSkillTraversal:
+    def test_rejects_path_traversal_name(self, tmp_path):
+        skills = tmp_path / "skills"
+        victim = tmp_path / "victim"
+        (skills / "keepme").mkdir(parents=True)
+        victim.mkdir()
+        (victim / "data.txt").write_text("do not delete")
+
+        with pytest.raises(ValueError, match="Invalid skill name"):
+            registry.remove_skill("../victim", scope="global")
+
+    def test_rejects_absolute_name(self, tmp_path):
+        with pytest.raises(ValueError, match="Invalid skill name"):
+            registry.remove_skill("/etc", scope="global")
+
+    def test_removes_legitimate_skill(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", lambda: home)
+        skills = home / ".config" / "gearcore" / "skills"
+        (skills / "my-skill").mkdir(parents=True)
+        (skills / "my-skill" / "SKILL.md").write_text("# x")
+
+        dest_parent = registry.remove_skill("my-skill", scope="global")
+        assert not (skills / "my-skill").exists()
+        assert dest_parent == skills
+
+
+class TestCorruptConfig:
+    def test_add_mcp_fails_loudly_on_corrupt_config(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        cfg = home / ".config" / "gearcore" / "config.yaml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text("{not:: valid yaml [")
+
+        monkeypatch.setenv("HOME", str(home))
+        with pytest.raises(ValueError, match="not valid YAML"):
+            registry.add_mcp(id="x", type="stdio", command="y")

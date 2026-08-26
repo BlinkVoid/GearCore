@@ -61,7 +61,7 @@ Create `src/gearcore_hub/update.py` with helper functions:
 For each registered MCP server:
 - Try to infer source path from `--directory <path>` or `--directory=<path>` in args, or from the command path if it is a local script.
 - If path found, get `git rev-parse HEAD`.
-- If changed (or `--source-path` provided), call `remove_mcp(id)` then `add_mcp(...)` with the existing config.
+- If changed (or `--source-path` provided), rewrite the raw YAML entry **in place** (single `_write_yaml`), preserving any keys GearCore does not model. The original remove+add approach was replaced (2026-08-26) because a failure between the two calls left the server deregistered, and reconstruction via `add_mcp` dropped unknown YAML keys.
 - Store new `update_metadata: {source_path, revision}` in the config entry.
 
 ### Skills

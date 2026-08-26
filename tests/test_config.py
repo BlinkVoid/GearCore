@@ -107,7 +107,11 @@ class TestEffectiveConfig:
         project_cfg = ProjectConfig(
             registry={
                 "mcp_servers": [
-                    {"id": "swarm-gateway", "type": "sse", "url": "http://127.0.0.1:8765/sse"}
+                    {
+                        "id": "swarm-gateway",
+                        "type": "sse",
+                        "url": "http://127.0.0.1:8765/sse",
+                    }
                 ]
             }
         )
@@ -158,7 +162,9 @@ class TestEffectiveConfig:
             servers = effective.mcp_servers
         assert [s.id for s in servers] == ["fs", "gw"]
         assert servers[1].url == "http://project:2/sse"
-        assert any("gw" in r.message and "override" in r.message for r in caplog.records)
+        assert any(
+            "gw" in r.message and "override" in r.message for r in caplog.records
+        )
 
     def test_project_allowlist_does_not_hide_project_scoped_defs(self):
         global_cfg = GlobalConfig(
@@ -168,7 +174,11 @@ class TestEffectiveConfig:
             scope={"mcp_servers": {"include": ["fs"]}},
             registry={
                 "mcp_servers": [
-                    {"id": "swarm-gateway", "type": "sse", "url": "http://127.0.0.1:8765/sse"}
+                    {
+                        "id": "swarm-gateway",
+                        "type": "sse",
+                        "url": "http://127.0.0.1:8765/sse",
+                    }
                 ]
             },
         )
@@ -215,3 +225,49 @@ def test_load_global_config_missing_file_gives_defaults(tmp_path):
 
     g = load_global_config(tmp_path / "nope.yaml")
     assert g.disclosure.core_skills == []
+
+
+class TestMalformedMcpEntries:
+    def test_global_skips_malformed_entry_and_keeps_valid(self, caplog):
+        cfg = GlobalConfig(
+            registry={
+                "mcp_servers": [
+                    {"id": "ok", "type": "stdio", "command": "npx"},
+                    {"id": "bad", "args": "not-a-list"},
+                    "just-a-string",
+                ]
+            }
+        )
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            servers = cfg.mcp_servers
+
+        assert [s.id for s in servers] == ["ok"]
+        assert any("bad" in r.message for r in caplog.records)
+
+    def test_project_skips_malformed_entry_and_keeps_valid(self, caplog):
+        cfg = ProjectConfig(
+            registry={
+                "mcp_servers": [
+                    {"id": "proj-ok", "type": "sse", "url": "http://x"},
+                    {"type": 42},
+                ]
+            }
+        )
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            servers = cfg.mcp_servers
+
+        assert [s.id for s in servers] == ["proj-ok"]
+
+    def test_non_list_mcp_servers_yields_empty_with_warning(self, caplog):
+        cfg = GlobalConfig(registry={"mcp_servers": {"id": "oops"}})
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            assert cfg.mcp_servers == []

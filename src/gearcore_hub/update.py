@@ -14,9 +14,8 @@ from gearcore_hub.config import McpServerConfig
 from gearcore_hub.registry import (
     _config_path,
     _read_yaml,
+    _validated_skill_dest,
     _write_yaml,
-    add_mcp,
-    remove_mcp,
 )
 
 logger = logging.getLogger("gearcore.update")
@@ -159,7 +158,6 @@ def update_mcp_server(
             "message": f"Would update '{server_id}' {previous} -> {current}.",
         }
 
-    # Re-register: remove then add with identical fields + new metadata
     scope = (
         "project"
         if config.project_cfg
@@ -168,19 +166,46 @@ def update_mcp_server(
     )
     project_root = config.project_root if scope == "project" else None
 
+    # Update the raw YAML entry in place: single write, no remove/add window
+    # where the server would be deregistered, and unknown keys are preserved.
+    cfg_path = _config_path(scope, project_root)
     try:
-        remove_mcp(server_id, scope=scope, project_root=project_root)
-        add_mcp(
-            id=server.id,
-            type=server.type,
-            command=server.command,
-            args=list(server.args),
-            url=server.url,
-            env=dict(server.env) if server.env else None,
-            scope=scope,
-            project_root=project_root,
-            enabled=server.enabled,
+        data = _read_yaml(cfg_path)
+        servers = data.get("registry", {}).get("mcp_servers", [])
+        entry = next((s for s in servers if s.get("id") == server_id), None)
+        if entry is None:
+            return {
+                "id": server_id,
+                "changed": False,
+                "previous_revision": previous,
+                "current_revision": current,
+                "message": f"Entry '{server_id}' vanished from {cfg_path}; "
+                "not updating.",
+            }
+        entry.update(
+            {
+                "id": server.id,
+                "type": server.type,
+                "command": server.command,
+                "url": server.url,
+                "enabled": server.enabled,
+            }
         )
+        if server.args:
+            entry["args"] = list(server.args)
+        else:
+            entry.pop("args", None)
+        if server.env:
+            entry["env"] = dict(server.env)
+        else:
+            entry.pop("env", None)
+        entry.setdefault("update_metadata", {}).update(
+            {
+                "source_path": str(path),
+                "revision": current,
+            }
+        )
+        _write_yaml(cfg_path, data)
     except Exception as exc:
         return {
             "id": server_id,
@@ -189,21 +214,6 @@ def update_mcp_server(
             "current_revision": current,
             "message": f"Failed to update '{server_id}': {exc}",
         }
-
-    # Write updated metadata back into the config entry.
-    # We reload and mutate the raw YAML so we don't drop extra keys.
-    cfg_path = _config_path(scope, project_root)
-    data = _read_yaml(cfg_path)
-    for s in data.get("registry", {}).get("mcp_servers", []):
-        if s.get("id") == server_id:
-            s.setdefault("update_metadata", {}).update(
-                {
-                    "source_path": str(path),
-                    "revision": current,
-                }
-            )
-            break
-    _write_yaml(cfg_path, data)
 
     return {
         "id": server_id,
@@ -248,7 +258,7 @@ def _save_skill_update_metadata(
 def _find_installed_skill(name: str, config) -> Path | None:
     """Find installed skill directory by name across skills_dirs."""
     for directory in config.skills_dirs:
-        candidate = Path(directory) / name
+        candidate = _validated_skill_dest(name, Path(directory))
         if candidate.exists():
             return candidate
     return None
@@ -267,7 +277,14 @@ def update_skill(
     For copied skills, the original source is unknown; pass --source-path
     or the skill will be reported as "source unknown".
     """
-    installed = _find_installed_skill(name, config)
+    try:
+        installed = _find_installed_skill(name, config)
+    except ValueError as exc:
+        return {
+            "name": name,
+            "changed": False,
+            "message": str(exc),
+        }
     if installed is None:
         return {
             "name": name,
@@ -293,8 +310,8 @@ def update_skill(
     version = manifest.get("version") if manifest else None
     git_rev = get_git_revision(src) if src else None
 
-    # Find the skills_dir that owns this installation
-    skills_dir = next(Path(d) for d in config.skills_dirs if (Path(d) / name).exists())
+    # The skills_dir that owns this installation
+    skills_dir = installed.parent
     previous = _load_skill_update_metadata(skills_dir, name)
     current = {"version": version, "revision": git_rev}
 

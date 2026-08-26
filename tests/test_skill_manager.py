@@ -138,3 +138,39 @@ class TestToolActivation:
             assert sm.is_tool_active("playwright", "browser_navigate") is True
             assert sm.is_tool_active("playwright", "other_tool") is False
             assert sm.is_tool_active("other_server", "browser_navigate") is False
+
+
+class TestShadowing:
+    def test_project_local_shadowing_global_logs_warning(self, caplog):
+        import logging
+
+        with tempfile.TemporaryDirectory() as tmp:
+            global_dir = Path(tmp) / "global-skills"
+            project_dir = Path(tmp) / "proj" / ".gearcore" / "skills"
+            _make_skill_dir(global_dir, "dup-skill")
+            _make_skill_dir(project_dir, "dup-skill")
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(global_dir)]})
+            effective = EffectiveConfig(global_cfg, ProjectConfig(), Path(tmp) / "proj")
+
+            with caplog.at_level(logging.WARNING):
+                sm = SkillManager(effective)
+
+        assert sm.get_skill("dup-skill").is_project_local is True
+        assert any("shadows" in r.message for r in caplog.records)
+
+    def test_no_warning_for_distinct_skills(self, caplog):
+        import logging
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_skill_dir(skills_dir, "skill-a")
+            _make_skill_dir(skills_dir, "skill-b")
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+
+            with caplog.at_level(logging.WARNING):
+                SkillManager(effective)
+
+        assert not any("shadows" in r.message for r in caplog.records)

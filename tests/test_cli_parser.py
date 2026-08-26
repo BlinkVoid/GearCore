@@ -48,8 +48,13 @@ def test_status_prints_vendor_manifest(capsys):
 
     config = load_config(global_config_path=Path("/nonexistent"))
 
-    with patch("gearcore_hub.vendor.load_vendor_manifest", return_value=manifest), \
-         patch("gearcore_hub.vendor.get_upstream_commit_cached", return_value="abcdef1234567890"):
+    with (
+        patch("gearcore_hub.vendor.load_vendor_manifest", return_value=manifest),
+        patch(
+            "gearcore_hub.vendor.get_upstream_commit_cached",
+            return_value="abcdef1234567890",
+        ),
+    ):
         cmd_status(config)
 
     captured = capsys.readouterr()
@@ -66,10 +71,41 @@ def test_status_prints_update_hint_when_upstream_different(capsys):
 
     config = load_config(global_config_path=Path("/nonexistent"))
 
-    with patch("gearcore_hub.vendor.load_vendor_manifest", return_value=manifest), \
-         patch("gearcore_hub.vendor.get_upstream_commit_cached", return_value="fedcba0987654321"):
+    with (
+        patch("gearcore_hub.vendor.load_vendor_manifest", return_value=manifest),
+        patch(
+            "gearcore_hub.vendor.get_upstream_commit_cached",
+            return_value="fedcba0987654321",
+        ),
+    ):
         cmd_status(config)
 
     captured = capsys.readouterr()
     assert "update available" in captured.out
     assert "fedcba098765" in captured.out
+
+
+class TestHelperBehavior:
+    def test_server_version_uses_package_metadata(self):
+        import importlib.metadata
+
+        from gearcore_hub.main import server_version
+
+        assert server_version() == importlib.metadata.version("gearcore")
+
+    def test_parse_env_args_skips_malformed_with_warning(self, caplog):
+        import logging
+
+        from gearcore_hub.main import parse_env_args
+
+        with caplog.at_level(logging.WARNING):
+            env = parse_env_args(["A=1", "malformed", "B=two=parts"])
+
+        assert env == {"A": "1", "B": "two=parts"}
+        assert any("malformed" in r.message for r in caplog.records)
+
+    def test_parse_env_args_none_for_empty(self):
+        from gearcore_hub.main import parse_env_args
+
+        assert parse_env_args(None) is None
+        assert parse_env_args([]) is None

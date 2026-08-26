@@ -8,7 +8,9 @@ from gearcore_hub.main import build_parser
 
 def test_project_scoped_skill_examples_are_accepted(tmp_path: Path):
     """BUG-Swarm-036: published self-skill commands must match argparse."""
-    skill_path = Path(__file__).parents[1] / "src" / "gearcore_hub" / "self_skill" / "SKILL.md"
+    skill_path = (
+        Path(__file__).parents[1] / "src" / "gearcore_hub" / "self_skill" / "SKILL.md"
+    )
     commands = [
         line.strip()
         for line in skill_path.read_text(encoding="utf-8").splitlines()

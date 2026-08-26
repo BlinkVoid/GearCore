@@ -45,7 +45,9 @@ def test_failed_lookup_is_not_cached(tmp_path):
     cache_file = tmp_path / "ls-remote.json"
     with (
         patch("gearcore_hub.vendor._cache_path", return_value=cache_file),
-        patch("gearcore_hub.vendor.get_upstream_commit", return_value=None) as mock_remote,
+        patch(
+            "gearcore_hub.vendor.get_upstream_commit", return_value=None
+        ) as mock_remote,
     ):
         assert get_upstream_commit_cached("src", "main") is None
         # A failed lookup must not poison the cache: next call retries.

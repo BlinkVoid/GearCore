@@ -49,7 +49,11 @@ def load_vendor_manifest() -> VendorManifest | None:
 
 
 def get_upstream_commit(source: str, ref: str) -> str | None:
-    """Return the commit SHA for *ref* in *source* via git ls-remote, or None."""
+    """Return the commit SHA for *ref* in *source* via git ls-remote, or None.
+
+    A loose ref like "main" can match both a branch and a tag; prefer the
+    branch (refs/heads/<ref>), then the literal ref, then any match.
+    """
     try:
         result = subprocess.run(
             ["git", "ls-remote", source, ref],
@@ -59,8 +63,21 @@ def get_upstream_commit(source: str, ref: str) -> str | None:
             timeout=30.0,
         )
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        if lines:
-            return lines[0].split()[0]
+        entries = [line.split() for line in lines]
+        if not entries:
+            return None
+        by_ref: dict[str, str] = {}
+        for parts in entries:
+            for r in parts[1:]:
+                by_ref[r] = parts[0]
+        for wanted in (
+            f"refs/heads/{ref}",
+            ref if ref.startswith("refs/") else None,
+            f"refs/tags/{ref}",
+        ):
+            if wanted and wanted in by_ref:
+                return by_ref[wanted]
+        return next(iter(by_ref.values()))
     except Exception as exc:
         logger.debug("git ls-remote failed for %s %s: %s", source, ref, exc)
     return None
@@ -102,7 +119,10 @@ def get_upstream_commit_cached(
     data[key] = {"sha": sha, "ts": time.time()}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data), encoding="utf-8")
+        # Atomic replace so a concurrent reader never sees a partial file
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp_path, path)
     except OSError as exc:
         logger.debug("Could not write ls-remote cache: %s", exc)
     return sha

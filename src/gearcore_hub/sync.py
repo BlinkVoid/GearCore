@@ -97,6 +97,14 @@ def _detect_installed_tools() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+class UnsafeTargetError(RuntimeError):
+    """Raised when a destructive sync step would clobber a foreign directory."""
+
+
+def _looks_like_gearcore_skill(path: Path) -> bool:
+    return (path / "SKILL.md").exists() and (path / "manifest.json").exists()
+
+
 def _install_canonical(dry_run: bool = False) -> bool:
     """
     Copy self-skill bundle to canonical location.
@@ -106,13 +114,22 @@ def _install_canonical(dry_run: bool = False) -> bool:
         logger.error("Self-skill source not found at %s", SELF_SKILL_SOURCE)
         return False
 
-    if CANONICAL_DIR.exists() or CANONICAL_DIR.is_symlink():
+    if CANONICAL_DIR.is_symlink():
+        logger.info("Canonical skill is a symlink — replacing it")
+        if not dry_run:
+            CANONICAL_DIR.unlink()
+    elif CANONICAL_DIR.exists():
+        if not _looks_like_gearcore_skill(CANONICAL_DIR):
+            logger.error(
+                "Refusing to replace %s: it is not a GearCore-managed "
+                "skill directory (no SKILL.md/manifest.json). Remove it "
+                "manually if this location should be used.",
+                CANONICAL_DIR,
+            )
+            return False
         logger.info("Canonical skill already exists at %s — updating", CANONICAL_DIR)
         if not dry_run:
-            if CANONICAL_DIR.is_symlink():
-                CANONICAL_DIR.unlink()
-            else:
-                shutil.rmtree(CANONICAL_DIR)
+            shutil.rmtree(CANONICAL_DIR)
     else:
         logger.info("Installing canonical skill → %s", CANONICAL_DIR)
 
@@ -121,7 +138,9 @@ def _install_canonical(dry_run: bool = False) -> bool:
         shutil.copytree(SELF_SKILL_SOURCE, CANONICAL_DIR)
 
         if embed_level0_section(CANONICAL_DIR / "SKILL.md"):
-            logger.info("Embedded level-0 default-skills section into canonical SKILL.md")
+            logger.info(
+                "Embedded level-0 default-skills section into canonical SKILL.md"
+            )
 
     return True
 
@@ -141,6 +160,11 @@ def _link_tool(tool: str, dry_run: bool = False) -> Path | None:
         if not dry_run:
             link.unlink()
     elif link.exists():
+        if not _looks_like_gearcore_skill(link):
+            raise UnsafeTargetError(
+                f"refused: {link} is a real directory that GearCore did "
+                "not install (no SKILL.md/manifest.json); remove it manually"
+            )
         logger.info("[%s] replacing directory with symlink → %s", tool, CANONICAL_DIR)
         if not dry_run:
             shutil.rmtree(link)
@@ -240,7 +264,11 @@ def sync(
         if tool not in TOOL_LINK_PATHS:
             results[tool] = "unknown tool"
             continue
-        link = _link_tool(tool, dry_run=dry_run)
+        try:
+            link = _link_tool(tool, dry_run=dry_run)
+        except UnsafeTargetError as exc:
+            results[tool] = str(exc)
+            continue
         results[tool] = f"{prefix}linked" if link is not None else "already linked"
 
     # kimi reads ~/.config/agents/skills/ natively — note it even if not in target_tools

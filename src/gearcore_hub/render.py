@@ -67,8 +67,6 @@ def apply_level0_marker(content: str, section: str) -> str:
     if LEVEL0_MARKER not in content:
         return content
     if not section:
-        lines = [
-            line for line in content.splitlines() if line.strip() != LEVEL0_MARKER
-        ]
+        lines = [line for line in content.splitlines() if line.strip() != LEVEL0_MARKER]
         return "\n".join(lines) + ("\n" if content.endswith("\n") else "")
     return content.replace(LEVEL0_MARKER, section)

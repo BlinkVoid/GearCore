@@ -90,13 +90,16 @@ class SharedMCPServer:
                 self._session_ctx = session_cm
                 self._streams = streams
                 logger.info("MCP server '%s' initialized.", self.server_id)
-            except Exception:
-                # Cleanup partial initialization on failure
+            except BaseException:
+                # Cleanup partial initialization on failure.
+                # BaseException (not Exception) so CancelledError from a
+                # backend-start timeout can't leak the client/session CMs
+                # and orphan the spawned subprocess.
                 if session_cm is not None:
-                    with contextlib.suppress(Exception):
+                    with contextlib.suppress(BaseException):
                         await session_cm.__aexit__(*sys.exc_info())
                 if client_cm is not None:
-                    with contextlib.suppress(Exception):
+                    with contextlib.suppress(BaseException):
                         await client_cm.__aexit__(*sys.exc_info())
                 self.session = None
                 self._client_ctx = None

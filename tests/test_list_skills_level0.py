@@ -14,7 +14,9 @@ from gearcore_hub.main import cmd_list_skills
 def _make_skill(base: Path, name: str) -> None:
     d = base / name
     d.mkdir(parents=True)
-    (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n\n# {name}\n\nInstructions body.")
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\n---\n\n# {name}\n\nInstructions body."
+    )
     (d / "manifest.json").write_text(f'{{"name": "{name}", "description": "desc"}}')
 
 

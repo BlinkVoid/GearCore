@@ -63,6 +63,28 @@ logging.basicConfig(
 logger = logging.getLogger("gearcore")
 
 
+def server_version() -> str:
+    """Package version from installed metadata; never drifts from pyproject."""
+    try:
+        import importlib.metadata
+
+        return importlib.metadata.version("gearcore")
+    except Exception:
+        return "0.0.0"
+
+
+def parse_env_args(values: list[str] | None) -> dict[str, str] | None:
+    """Parse KEY=value CLI args, warning about and skipping malformed entries."""
+    env: dict[str, str] = {}
+    for kv in values or []:
+        if "=" not in kv:
+            logger.warning("Ignoring malformed --env entry %r (expected KEY=value)", kv)
+            continue
+        key, value = kv.split("=", 1)
+        env[key] = value
+    return env or None
+
+
 # ---------------------------------------------------------------------------
 # Serve command — the MCP hub runtime
 # ---------------------------------------------------------------------------
@@ -243,7 +265,7 @@ class GearCoreHub:
                     write_stream,
                     InitializationOptions(
                         server_name="gearcore-hub",
-                        server_version="2.2.0",
+                        server_version=server_version(),
                         capabilities=self.server.get_capabilities(
                             notification_options=NotificationOptions(),
                             experimental_capabilities={},
@@ -289,6 +311,8 @@ def cmd_status(config: EffectiveConfig):
     print(f"  strategy: {disc.strategy}")
     print(f"  core_skills: {disc.core_skills or '(none)'}")
     print(f"  activation_threshold: {disc.activation_threshold}")
+    # Lazy import: tests patch gearcore_hub.vendor.* and the other command
+    # handlers follow the same deferred-import style.
     from gearcore_hub.vendor import get_upstream_commit_cached, load_vendor_manifest
 
     manifest = load_vendor_manifest()
@@ -421,7 +445,10 @@ def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str)
                 if hasattr(content, "text"):
                     print(content.text)
                 elif hasattr(content, "data"):
-                    print(content.data)
+                    data = content.data
+                    if isinstance(data, bytes):
+                        data = data.decode("utf-8", errors="replace")
+                    print(data)
         finally:
             await server.stop()
 
@@ -652,7 +679,7 @@ def main():
     if command == "add-mcp":
         from gearcore_hub.registry import add_mcp
 
-        env = dict(kv.split("=", 1) for kv in (args.env or []) if "=" in kv) or None
+        env = parse_env_args(args.env)
         try:
             path = add_mcp(
                 id=args.id,

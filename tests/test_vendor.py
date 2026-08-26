@@ -236,3 +236,45 @@ def test_update_superpowers_dry_run_reports_change(tmp_path, monkeypatch):
     )
     result = update_superpowers(dry_run=True)
     assert result == {"changed": True, "upstream": "def456", "dry_run": True}
+
+
+def test_get_upstream_commit_prefers_branch_over_same_named_tag(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        class Result:
+            stdout = "aaaaaaa\trefs/tags/main\nbbbbbbb\trefs/heads/main\n"
+            stderr = ""
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr("gearcore_hub.vendor.subprocess.run", fake_run)
+    assert get_upstream_commit("https://example.com/repo.git", "main") == "bbbbbbb"
+
+
+def test_get_upstream_commit_falls_back_to_tag_when_no_branch(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        class Result:
+            stdout = "ccccccc\trefs/tags/v1.0\n"
+            stderr = ""
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr("gearcore_hub.vendor.subprocess.run", fake_run)
+    assert get_upstream_commit("https://example.com/repo.git", "v1.0") == "ccccccc"
+
+
+def test_get_upstream_commit_accepts_explicit_ref(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        class Result:
+            stdout = "ddddddd\trefs/pull/42/head\n"
+            stderr = ""
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr("gearcore_hub.vendor.subprocess.run", fake_run)
+    assert (
+        get_upstream_commit("https://example.com/repo.git", "refs/pull/42/head")
+        == "ddddddd"
+    )

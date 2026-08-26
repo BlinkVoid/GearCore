@@ -18,6 +18,7 @@ from gearcore_hub.update import (
 def test_get_git_revision(tmp_path: Path):
     # Initialize a git repo to get a real short SHA
     import subprocess
+
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / "file.txt").write_text("x")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
@@ -48,7 +49,14 @@ def test_infer_mcp_source_path_from_directory_flag():
     server = McpServerConfig(
         id="sample-prompts",
         command="uv",
-        args=["run", "--directory", "/home/foo/SamplePrompts", "python", "-m", "sample-prompts.main"],
+        args=[
+            "run",
+            "--directory",
+            "/home/foo/SamplePrompts",
+            "python",
+            "-m",
+            "sample-prompts.main",
+        ],
     )
     assert infer_mcp_source_path(server) == Path("/home/foo/SamplePrompts").resolve()
 
@@ -58,11 +66,16 @@ def test_infer_mcp_source_path_from_absolute_command():
         id="sample-devtools",
         command="/home/foo/SampleDevtools/.venv/bin/sample-devtools-mcp",
     )
-    assert infer_mcp_source_path(server) == Path("/home/foo/SampleDevtools/.venv/bin").resolve()
+    assert (
+        infer_mcp_source_path(server)
+        == Path("/home/foo/SampleDevtools/.venv/bin").resolve()
+    )
 
 
 def test_infer_mcp_source_path_unknown():
-    server = McpServerConfig(id="cloudflare", command="npx", args=["-y", "@playwright/mcp"])
+    server = McpServerConfig(
+        id="cloudflare", command="npx", args=["-y", "@playwright/mcp"]
+    )
     assert infer_mcp_source_path(server) is None
 
 
@@ -80,14 +93,10 @@ def test_update_mcp_server_no_change(tmp_path: Path):
 
     with (
         patch("gearcore_hub.update.get_git_revision", return_value="abc1234"),
-        patch("gearcore_hub.update.remove_mcp") as mock_remove,
-        patch("gearcore_hub.update.add_mcp") as mock_add,
     ):
         result = update_mcp_server(config, "demo")
         assert result["changed"] is False
         assert "up to date" in result["message"]
-        mock_remove.assert_not_called()
-        mock_add.assert_not_called()
 
 
 def test_update_mcp_server_changes(tmp_path: Path):
@@ -104,8 +113,6 @@ def test_update_mcp_server_changes(tmp_path: Path):
 
     with (
         patch("gearcore_hub.update.get_git_revision", return_value="newrev"),
-        patch("gearcore_hub.update.remove_mcp") as mock_remove,
-        patch("gearcore_hub.update.add_mcp") as mock_add,
         patch(
             "gearcore_hub.update._read_yaml",
             return_value={"registry": {"mcp_servers": [{"id": "demo"}]}},
@@ -115,8 +122,7 @@ def test_update_mcp_server_changes(tmp_path: Path):
         result = update_mcp_server(config, "demo")
         assert result["changed"] is True
         assert result["current_revision"] == "newrev"
-        mock_remove.assert_called_once()
-        mock_add.assert_called_once()
+        # Single in-place write, no deregistration window
         mock_write.assert_called_once()
 
 
@@ -132,14 +138,10 @@ def test_update_mcp_server_dry_run(tmp_path: Path):
 
     with (
         patch("gearcore_hub.update.get_git_revision", return_value="newrev"),
-        patch("gearcore_hub.update.remove_mcp") as mock_remove,
-        patch("gearcore_hub.update.add_mcp") as mock_add,
     ):
         result = update_mcp_server(config, "demo", dry_run=True)
         assert result["changed"] is True
         assert "Would update" in result["message"]
-        mock_remove.assert_not_called()
-        mock_add.assert_not_called()
 
 
 def test_update_skill_up_to_date(tmp_path: Path):
@@ -176,4 +178,46 @@ def test_update_skill_source_unknown(tmp_path: Path):
 
     result = update_skill("demo-skill", config)
     assert result["changed"] is False
-    assert "unknown" in result["message"].lower() or "source" in result["message"].lower()
+    assert (
+        "unknown" in result["message"].lower() or "source" in result["message"].lower()
+    )
+
+
+def test_update_mcp_server_updates_in_place_preserving_unknown_keys(tmp_path: Path):
+    server = McpServerConfig(
+        id="demo",
+        command="uv",
+        args=["run", "--directory", str(tmp_path), "python", "-m", "demo"],
+        update_metadata={"revision": "oldrev"},
+    )
+    config = MagicMock()
+    config.mcp_servers = [server]
+    config.project_cfg = None
+    config.project_root = None
+
+    existing_entry = {
+        "id": "demo",
+        "type": "stdio",
+        "command": "uv",
+        "custom_future_key": {"keep": "me"},
+    }
+
+    with (
+        patch("gearcore_hub.update.get_git_revision", return_value="newrev"),
+        patch(
+            "gearcore_hub.update._read_yaml",
+            return_value={"registry": {"mcp_servers": [existing_entry]}},
+        ),
+        patch("gearcore_hub.update._write_yaml") as mock_write,
+    ):
+        result = update_mcp_server(config, "demo")
+        assert result["changed"] is True
+        assert result["current_revision"] == "newrev"
+
+        # Unknown keys survive the update
+        (cfg_path, data), kwargs = mock_write.call_args
+        entry = next(
+            s for s in data["registry"]["mcp_servers"] if s.get("id") == "demo"
+        )
+        assert entry["custom_future_key"] == {"keep": "me"}
+        assert entry["update_metadata"]["revision"] == "newrev"

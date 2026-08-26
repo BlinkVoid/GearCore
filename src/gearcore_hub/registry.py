@@ -29,8 +29,13 @@ logger = logging.getLogger("gearcore.registry")
 
 def _read_yaml(path: Path) -> dict:
     if path.exists():
-        with open(path, encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            # Fail loudly instead of treating the file as empty — silently
+            # proceeding would overwrite the corrupt config on next write.
+            raise ValueError(f"Config file {path} is not valid YAML: {exc}") from exc
     return {}
 
 
@@ -49,7 +54,8 @@ def _config_path(scope: str, project_root: Path | None) -> Path:
                 "--scope project requires a project root (use --project <path>)"
             )
         return project_root / ".gearcore" / "config.yaml"
-    return GLOBAL_CONFIG_PATH
+    # Resolve at call time so HOME overrides (tests, sandboxing) are honored.
+    return Path.home() / ".config" / "gearcore" / "config.yaml"
 
 
 def _skills_dir(scope: str, project_root: Path | None) -> Path:
@@ -116,17 +122,18 @@ def add_mcp(
             raise ValueError("--allowlist requires --scope project")
         global_data = _read_yaml(GLOBAL_CONFIG_PATH)
         global_ids = {
-            s.get("id")
-            for s in global_data.get("registry", {}).get("mcp_servers", [])
+            s.get("id") for s in global_data.get("registry", {}).get("mcp_servers", [])
         }
         if id not in global_ids:
             raise ValueError(
                 f"MCP server '{id}' is not registered globally; "
                 "omit --allowlist to write a project-local definition instead"
             )
-        include = data.setdefault("scope", {}).setdefault(
-            "mcp_servers", {}
-        ).setdefault("include", [])
+        include = (
+            data.setdefault("scope", {})
+            .setdefault("mcp_servers", {})
+            .setdefault("include", [])
+        )
         if id in include:
             raise ValueError(f"MCP server '{id}' already allowlisted in project.")
         include.append(id)
@@ -138,7 +145,9 @@ def add_mcp(
     servers = registry_section.setdefault("mcp_servers", [])
     if any(s.get("id") == id for s in servers):
         where = "in project" if scope == "project" else ""
-        raise ValueError(f"MCP server '{id}' already registered {where}. Remove it first.")
+        raise ValueError(
+            f"MCP server '{id}' already registered {where}. Remove it first."
+        )
 
     servers.append(_server_entry(id, type, command, args, url, env, enabled))
     _write_yaml(cfg_path, data)
@@ -333,13 +342,26 @@ def remove_mcp(
     return cfg_path
 
 
+def _validated_skill_dest(name: str, dest_dir: Path) -> Path:
+    """Join *name* onto *dest_dir*, rejecting anything that could escape it.
+
+    Lexical check only: symlinked skill bundles legitimately resolve
+    outside the skills dir, so the final path must not be resolved here.
+    Rejecting absolute names and '..' components makes escape impossible
+    for the join below.
+    """
+    if not name or Path(name).is_absolute() or ".." in Path(name).parts:
+        raise ValueError(f"Invalid skill name: {name!r}")
+    return dest_dir / name
+
+
 def remove_skill(
     name: str,
     scope: str = "global",
     project_root: Path | None = None,
 ) -> Path:
     """Delete a skill bundle directory from the skills dir."""
-    dest = _skills_dir(scope, project_root) / name
+    dest = _validated_skill_dest(name, _skills_dir(scope, project_root))
     if not dest.exists() and not dest.is_symlink():
         raise FileNotFoundError(f"Skill '{name}' not found at {dest}")
     if dest.is_symlink():

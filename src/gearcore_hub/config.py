@@ -69,6 +69,31 @@ def _default_skills_dirs() -> list[Path]:
     return dirs
 
 
+def _parse_server_entries(raw: Any, source: str) -> list[McpServerConfig]:
+    """Parse raw mcp_servers entries, skipping malformed ones with a warning.
+
+    One bad YAML entry must never brick every CLI command; the warning
+    names the config layer and the offending entry so it can be fixed.
+    """
+    if not isinstance(raw, list):
+        logger.warning("%s: mcp_servers is not a list; ignoring", source)
+        return []
+    servers: list[McpServerConfig] = []
+    for i, entry in enumerate(raw):
+        try:
+            servers.append(McpServerConfig(**entry))
+        except Exception as exc:
+            ident = (
+                entry.get("id", f"index {i}")
+                if isinstance(entry, dict)
+                else repr(entry)
+            )
+            logger.warning(
+                "%s: skipping malformed MCP server entry '%s': %s", source, ident, exc
+            )
+    return servers
+
+
 class GlobalConfig(BaseModel):
     """Schema for ~/.config/gearcore/config.yaml"""
 
@@ -79,8 +104,9 @@ class GlobalConfig(BaseModel):
 
     @property
     def mcp_servers(self) -> list[McpServerConfig]:
-        raw = self.registry.get("mcp_servers", [])
-        return [McpServerConfig(**s) for s in raw]
+        return _parse_server_entries(
+            self.registry.get("mcp_servers", []), "global config"
+        )
 
     @property
     def skills_dirs(self) -> list[Path]:
@@ -125,8 +151,9 @@ class ProjectConfig(BaseModel):
 
     @property
     def mcp_servers(self) -> list[McpServerConfig]:
-        raw = self.registry.get("mcp_servers", [])
-        return [McpServerConfig(**s) for s in raw]
+        return _parse_server_entries(
+            self.registry.get("mcp_servers", []), "project config"
+        )
 
 
 class EffectiveConfig:
@@ -155,9 +182,7 @@ class EffectiveConfig:
         allowlist = self.project_cfg.mcp_allowlist
         if allowlist is not None:
             servers = [s for s in servers if s.id in allowlist]
-        project_servers = [
-            s for s in self.project_cfg.mcp_servers if s.enabled
-        ]
+        project_servers = [s for s in self.project_cfg.mcp_servers if s.enabled]
         project_ids = {s.id for s in project_servers}
         shadowed = [s.id for s in servers if s.id in project_ids]
         if shadowed:

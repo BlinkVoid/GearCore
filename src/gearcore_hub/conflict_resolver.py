@@ -55,8 +55,30 @@ class ConflictResolver:
             if category_cfg:
                 strategy = category_cfg.get("strategy", "namespace")
                 preferred = category_cfg.get("preferred")
+                preferred_present = any(
+                    entry["server_id"] == preferred for entry in entries
+                )
+                if preferred and not preferred_present:
+                    logger.warning(
+                        "Resolution category for '%s': preferred server '%s' "
+                        "is not exposing this tool; falling back to namespacing",
+                        original_name,
+                        preferred,
+                    )
 
                 if strategy == "suppress_others":
+                    if not preferred_present:
+                        # Don't silently drop the tool: namespace everything
+                        for entry in entries:
+                            new_name = f"{entry['server_id']}_{original_name}"
+                            resolved_tools.append(
+                                entry["tool"].model_copy(update={"name": new_name})
+                            )
+                            tool_map[new_name] = {
+                                "server_id": entry["server_id"],
+                                "original_name": original_name,
+                            }
+                        continue
                     # Only include the preferred one
                     for entry in entries:
                         if entry["server_id"] == preferred:
@@ -91,6 +113,18 @@ class ConflictResolver:
 
                 elif strategy == "unify":
                     unified_name = category_cfg.get("unified_name", original_name)
+                    if not preferred_present:
+                        # Don't silently drop the tool: namespace everything
+                        for entry in entries:
+                            new_name = f"{entry['server_id']}_{original_name}"
+                            resolved_tools.append(
+                                entry["tool"].model_copy(update={"name": new_name})
+                            )
+                            tool_map[new_name] = {
+                                "server_id": entry["server_id"],
+                                "original_name": original_name,
+                            }
+                        continue
                     for entry in entries:
                         if entry["server_id"] == preferred:
                             resolved_tools.append(

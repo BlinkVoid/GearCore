@@ -23,7 +23,9 @@ def _write_global_config(tmp_path: Path, skills_dir: Path, core: list[str]) -> P
 def _make_skill(base: Path, name: str) -> None:
     d = base / name
     d.mkdir(parents=True)
-    (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: continuity stuff\n---\n\n# {name}")
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: continuity stuff\n---\n\n# {name}"
+    )
     (d / "manifest.json").write_text(
         f'{{"name": "{name}", "description": "continuity stuff"}}'
     )

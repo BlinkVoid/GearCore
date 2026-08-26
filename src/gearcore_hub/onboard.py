@@ -354,45 +354,22 @@ def _extract_skill_name(skill_path: Path) -> str:
         parts = text.split("---", 2)
         if len(parts) >= 2:
             frontmatter = yaml.safe_load(parts[1])
-            name = (
-                frontmatter.get("name")
-                if isinstance(frontmatter, dict)
-                else None
-            )
+            name = frontmatter.get("name") if isinstance(frontmatter, dict) else None
             if isinstance(name, str):
                 return name
     return skill_path.name
 
 
-def _read_yaml(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+# Shared config/skills-path helpers live in registry; onboard uses the same
+# global/project resolution rules so both modules can never drift apart.
+from gearcore_hub.registry import (  # noqa: E402
+    _config_path,
+    _read_yaml,
+    _skills_dir,
+    _write_yaml,
+)
 
-
-def _write_yaml(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(
-            data, f, default_flow_style=False, allow_unicode=True, sort_keys=False
-        )
-
-
-def _config_path(scope: str, project_root: Path | None) -> Path:
-    if scope == "project":
-        if project_root is None:
-            raise ValueError("--scope project requires --project")
-        return project_root / ".gearcore" / "config.yaml"
-    return Path.home() / ".config" / "gearcore" / "config.yaml"
-
-
-def _skills_root(scope: str, project_root: Path | None) -> Path:
-    if scope == "project":
-        if project_root is None:
-            raise ValueError("--scope project requires --project")
-        return project_root / ".gearcore" / "skills"
-    return Path.home() / ".config" / "gearcore" / "skills"
+_skills_root = _skills_dir
 
 
 def _normalize_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -475,7 +452,9 @@ def _dirs_equal(left: Path, right: Path) -> bool:
     for filename in cmp.common_files:
         if not filecmp.cmp(left / filename, right / filename, shallow=False):
             return False
-    return all(_dirs_equal(Path(sub.left), Path(sub.right)) for sub in cmp.subdirs.values())
+    return all(
+        _dirs_equal(Path(sub.left), Path(sub.right)) for sub in cmp.subdirs.values()
+    )
 
 
 def _write_mcp_entry(

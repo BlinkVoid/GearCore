@@ -149,3 +149,52 @@ class TestDefaultConflict:
         names = [t.name for t in tools]
         assert "fs_search" in names
         assert "web_search" in names
+
+
+class TestPreferredNotPresent:
+    def _resolver(self, strategy: str) -> ConflictResolver:
+        return ConflictResolver(
+            {
+                "categories": {
+                    "file_io": {
+                        "preferred": "ghost-server",
+                        "strategy": strategy,
+                        "unified_name": "read",
+                    }
+                }
+            }
+        )
+
+    def _aggregated(self):
+        t1 = Tool(name="read_file", description="", inputSchema={})
+        t2 = Tool(name="read_file", description="", inputSchema={})
+        return [
+            {"server_id": "alpha", "tool": t1, "original_name": "read_file"},
+            {"server_id": "beta", "tool": t2, "original_name": "read_file"},
+        ]
+
+    def test_suppress_others_without_preferred_keeps_all_namespaced(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            tools, mapping = self._resolver("suppress_others").resolve(
+                self._aggregated()
+            )
+
+        assert len(tools) == 2
+        assert {t.name for t in tools} == {"alpha_read_file", "beta_read_file"}
+        assert any("ghost-server" in r.message for r in caplog.records)
+
+    def test_unify_without_preferred_keeps_all_namespaced(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            tools, mapping = self._resolver("unify").resolve(self._aggregated())
+
+        assert len(tools) == 2
+        assert len(mapping) == 2
+        assert any("ghost-server" in r.message for r in caplog.records)
+
+    def test_namespace_without_preferred_still_returns_all(self):
+        tools, mapping = self._resolver("namespace").resolve(self._aggregated())
+        assert len(tools) == 2

@@ -137,6 +137,8 @@ When multiple backends expose tools with the same name:
 2. **namespace** — non-preferred tools get a prefix (e.g. `fs_read_file`)
 3. **unify** — a single tool name routes to the preferred backend
 
+If a rule names a `preferred` server that is not actually exposing the tool, GearCore warns and falls back to server-id namespacing for every entry rather than silently dropping the tool.
+
 Resolution rules are defined in the global config under `resolution.categories`. Tools not matching any category get default server-id-prefixed namespacing.
 
 ---
@@ -148,6 +150,8 @@ GearCore includes a self-skill bundle (`src/gearcore_hub/self_skill/`) containin
 1. Copies the self-skill to `~/.config/agents/skills/gearcore/` (canonical)
 2. Creates symlinks from `~/.claude/skills/gearcore/`, `~/.codex/skills/gearcore/`, `~/.kimi/skills/gearcore/`, `~/.config/opencode/skills/gearcore/`
 3. Replaces the `<!-- GEARCORE:LEVEL0 -->` marker in the canonical `SKILL.md` with a generated "Default skills" section from the global config's `disclosure.core_skills` (see `docs/superpowers/specs/2026-07-07-level0-skill-reveal-design.md`)
+
+Safety guard: sync only replaces existing directories that look GearCore-managed (contain `SKILL.md` + `manifest.json`). A foreign real directory at a canonical or link path is never `rmtree`d — the step is refused with an error instead.
 
 Kimi natively scans `~/.config/agents/skills/` as its highest-priority user path. Claude and Codex discover via their respective symlinked paths. OpenCode scans `{skill,skills}/**/SKILL.md` under `~/.config/opencode/` (and would also pick up the `~/.claude/skills/` symlink via its Claude Code compatibility scan, but the dedicated symlink keeps GearCore visible even when that scan is disabled).
 

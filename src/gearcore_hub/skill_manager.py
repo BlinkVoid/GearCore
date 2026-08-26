@@ -155,6 +155,15 @@ class SkillManager:
             instructions=instructions,
             is_project_local=is_project_local,
         )
+        if manifest.name in self.skills:
+            previous = self.skills[manifest.name]
+            logger.warning(
+                "Skill '%s' from %s shadows definition from %s "
+                "(project-local definitions override global ones)",
+                manifest.name,
+                skill_path,
+                previous.path,
+            )
         self.skills[manifest.name] = bundle
         logger.debug(
             "Loaded %sskill: %s",
