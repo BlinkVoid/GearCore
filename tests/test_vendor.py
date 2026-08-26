@@ -1,6 +1,7 @@
 """Tests for the bundled superpowers vendor module."""
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -140,6 +141,24 @@ def test_sync_vendor_bundle_copies_skills_and_updates_manifest(tmp_path):
     updated = json.loads((dest_root / ".vendor.json").read_text())
     assert updated["vendored_commit"] == "new456"
     assert updated["vendored_at"] != "2026-01-01"
+
+
+VENDORED_EXECUTABLE_SCRIPTS = [
+    "subagent-driven-development/scripts/sdd-workspace",
+    "subagent-driven-development/scripts/task-brief",
+    "subagent-driven-development/scripts/review-package",
+    "brainstorming/scripts/start-server.sh",
+    "brainstorming/scripts/stop-server.sh",
+    "systematic-debugging/find-polluter.sh",
+]
+
+
+@pytest.mark.parametrize("rel_path", VENDORED_EXECUTABLE_SCRIPTS)
+def test_vendored_scripts_are_executable(rel_path):
+    script = bundled_superpowers_dir() / rel_path
+    assert script.exists(), f"missing vendored script: {rel_path}"
+    mode = script.stat().st_mode
+    assert mode & stat.S_IXUSR, f"vendored script not executable: {rel_path}"
 
 
 def test_update_superpowers_raises_when_no_manifest(tmp_path, monkeypatch):
