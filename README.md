@@ -98,13 +98,31 @@ gearcore add-mcp --id playwright --type stdio \
 gearcore add-skill /path/to/my-skill
 ```
 
-### 4. Or onboard a whole core package
+### 4. Or onboard a whole core package or plugin
 
 ```bash
 gearcore onboard /path/to/core
 ```
 
 Discovers `skills/*/SKILL.md` and MCP scripts in `pyproject.toml`, then registers what is found.
+
+If the directory is a **Codex-compatible plugin root** (contains
+`.codex-plugin/plugin.json`), the whole plugin is registered instead: the
+plugin — including sibling `commands`, `orchestration`, `scripts`, `config`,
+`configs`, `tests`, and `docs` — is linked into
+`~/.config/gearcore/plugins/<name>` (or `<project>/.gearcore/plugins/<name>`
+with `--scope project`), and its skills are registered through the installed
+plugin root. `--copy-skills` copies the whole plugin instead of symlinking;
+`--dry-run` previews the plan and the support components that will be
+preserved. See [PLUGIN_SCHEMA.md](PLUGIN_SCHEMA.md).
+
+> GearCore preserves plugin commands, orchestration, scripts, configs, tests,
+> and docs but does not auto-execute arbitrary plugin content.
+
+```bash
+# Uninstall a plugin: removes the registration and its skill links only
+gearcore remove plugin <name>
+```
 
 ### 5. Updating resources
 
@@ -199,10 +217,12 @@ list_tools → now includes browser_navigate, browser_click, ...
 ~/.config/gearcore/
   config.yaml          ← global: all MCPs, all skills, disclosure rules
   skills/              ← global skill bundles
+  plugins/             ← global registered plugins (whole-plugin onboarding)
 
 <project>/.gearcore/
   config.yaml          ← project: allowlist subset, project-local MCP defs, overrides, context name
   skills/              ← project-local skills (always visible in project)
+  plugins/             ← project-registered plugins
 ```
 
 **Resolution order:** built-in defaults → global → project. Projects *narrow* global scope via allowlists. Project-local definitions (`.gearcore/skills/` and project `registry.mcp_servers`) are always visible in that project, never outside it; a project MCP def overrides a global one with the same id.
@@ -218,9 +238,9 @@ list_tools → now includes browser_navigate, browser_click, ...
 | `gearcore serve` | Run the MCP hub (used automatically by AI tools) |
 | `gearcore add-mcp` | Register a new MCP server (`--scope project` for a project-local def, add `--allowlist` to allowlist an existing global server instead) |
 | `gearcore add-skill <path>` | Register a skill bundle |
-| `gearcore onboard <core-path>` | Discover and register MCP servers and/or skills from a core package |
+| `gearcore onboard <core-path>` | Discover and register MCP servers and/or skills from a core package; registers whole Codex-compatible plugins (`.codex-plugin/plugin.json`) at the scope's plugins dir |
 | `gearcore add-cli <program>` | Wrap a CLI program into a skill |
-| `gearcore remove mcp\|skill <name>` | Remove an MCP or skill |
+| `gearcore remove mcp\|skill\|plugin <name>` | Remove an MCP, skill, or plugin registration |
 | `gearcore sync` | Install self-skill to Claude / Codex / Kimi / OpenCode |
 | `gearcore update [mcp\|skill\|superpowers] [name]` | Version-aware refresh of registered resources, then re-sync |
 
@@ -277,6 +297,7 @@ See [SKILL_SCHEMA.md](SKILL_SCHEMA.md) for the full specification.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and data flow
 - [CONFIG_SCHEMA.md](CONFIG_SCHEMA.md) — config file specification
 - [SKILL_SCHEMA.md](SKILL_SCHEMA.md) — skill bundle format
+- [PLUGIN_SCHEMA.md](PLUGIN_SCHEMA.md) — Codex-compatible plugin format and onboarding
 - [CONFLICT_RESOLUTION.md](CONFLICT_RESOLUTION.md) — deduplication strategy
 - [DESIGN_RATIONALE.md](DESIGN_RATIONALE.md) — why skill-first, not MCP-first
 

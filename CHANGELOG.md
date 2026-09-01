@@ -5,6 +5,32 @@ All notable changes to GearCore will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Whole-plugin onboarding: `gearcore onboard` now detects Codex-compatible
+  plugin roots (`.codex-plugin/plugin.json`), validates the manifest name and
+  skills path, registers the whole plugin at the scope-specific plugins
+  directory (`~/.config/gearcore/plugins/<name>` or
+  `<project>/.gearcore/plugins/<name>`; symlink by default, full copy with
+  `--copy-skills`), and registers discovered skills through the installed
+  plugin root. Preflight is atomic — conflicting plugin/skill destinations
+  (including broken symlinks) cause no mutations — and re-onboarding
+  equivalent roots and links is a no-op. Plugin commands, orchestration,
+  scripts, configs, tests, and docs are preserved as-is; GearCore does not
+  auto-execute arbitrary plugin content (schema: `PLUGIN_SCHEMA.md`)
+- `gearcore remove plugin <name>`: removes only the registered plugin path and
+  skill symlinks pointing inside it; external symlink sources are never deleted
+- Rendered skill instructions (`request-skill`, `request_skill`) now include
+  the absolute registered and resolved skill bundle locations, with guidance
+  that relative resources resolve from the bundle root (applies to
+  plugin-backed and ordinary skills)
+
+### Changed
+- `--dry-run` output for plugin onboarding identifies the plugin action and
+  the preserved top-level support components (commands, orchestration,
+  scripts, config, configs, tests, docs)
+
 ## [2.2.0] - 2026-08-25
 
 ### Added

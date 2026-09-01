@@ -8,7 +8,9 @@ so the different surfaces cannot drift apart.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from gearcore_hub.skill_manager import SkillBundle
 
@@ -18,6 +20,7 @@ logger = logging.getLogger("gearcore.render")
 def render_skill_instructions(bundle: SkillBundle) -> str:
     """Full text an AI needs to use a skill: SKILL.md + `gearcore call` lines."""
     parts = [bundle.instructions]
+    parts.append(_bundle_location_section(bundle))
     if bundle.manifest.mcp_servers:
         lines = ["", "---", "", "## Available tools (via `gearcore call`)", ""]
         for mcp_entry in bundle.manifest.mcp_servers:
@@ -26,6 +29,31 @@ def render_skill_instructions(bundle: SkillBundle) -> str:
                 lines.append(f"  gearcore call {server_id} {tool} '<json_args>'")
         parts.append("\n".join(lines))
     return "\n".join(parts)
+
+
+def _bundle_location_section(bundle: SkillBundle) -> str:
+    """Absolute registered + resolved bundle locations for plugin-backed and
+    ordinary skills, with guidance that relative resources resolve from the
+    bundle root."""
+    registered = os.path.abspath(bundle.path)
+    try:
+        resolved = bundle.path.resolve()
+    except OSError:
+        resolved = Path(registered)
+    return "\n".join(
+        [
+            "",
+            "---",
+            "",
+            "## Skill bundle location",
+            "",
+            f"- Registered at: `{registered}`",
+            f"- Resolved bundle root: `{resolved}`",
+            "",
+            "Relative resources referenced by these instructions "
+            "(scripts, templates, docs) resolve from the resolved bundle root.",
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------

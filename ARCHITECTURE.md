@@ -169,6 +169,41 @@ This enables any CLI program to become a progressive-disclosure-gated skill with
 
 ---
 
+## Whole-Plugin Onboarding
+
+`gearcore onboard <path>` detects **Codex-compatible plugin roots** by the
+presence of `.codex-plugin/plugin.json`. For a plugin root, the plan switches
+from per-skill registration to whole-plugin registration:
+
+1. The manifest is parsed: `name` (which must match the exact grammar
+   `[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*`) and the optional `skills` path
+   (default `./skills`), which must stay lexically and after filesystem
+   resolution inside the plugin root (`plugin.py`). Missing in-root skills
+   directories are valid; symlinked paths resolving outside the root are not.
+2. The whole plugin is registered at the scope-specific plugins directory —
+   `~/.config/gearcore/plugins/<name>` or `<project>/.gearcore/plugins/<name>`
+   — as a symlink by default, or a full copy with `--copy-skills` so all
+   sibling content (commands, orchestration, scripts, config, configs, tests,
+   docs) is preserved. Plugin-root copies preserve symlinks as symlinks.
+3. Discovered skills are registered as symlinks **through the installed plugin
+   root** (`…/plugins/<name>/skills/<skill>`), never directly at the original
+   skills leaf.
+4. Preflight is atomic: conflicting plugin or skill destinations (including
+   broken symlinks) abort with no mutations; equivalent roots and links make
+   re-onboarding a no-op.
+
+`gearcore remove plugin <name>` reverses the registration: it deletes only the
+registered plugin path and skill symlinks resolving inside it — never the
+external source of a symlink.
+
+**Safety boundary:** GearCore preserves plugin commands, orchestration,
+scripts, configs, tests, and docs but does not auto-execute arbitrary plugin
+content. Unrecognized manifest fields and plugin content are preserved but are
+not automatically interpreted or registered as MCP backends. Schema:
+[PLUGIN_SCHEMA.md](PLUGIN_SCHEMA.md).
+
+---
+
 ## Module Map
 
 | Module | Responsibility |
@@ -181,3 +216,4 @@ This enables any CLI program to become a progressive-disclosure-gated skill with
 | `registry.py` | `add-mcp`, `add-skill`, `add-cli`, `remove` — config/skill-dir mutations |
 | `sync.py` | Self-skill install, symlink management across AI CLI tools |
 | `render.py` | Shared instruction rendering, level-0 section generation |
+| `plugin.py` | Codex-compatible plugin manifest detection, validation, support-component discovery |

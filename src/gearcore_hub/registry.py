@@ -66,6 +66,15 @@ def _skills_dir(scope: str, project_root: Path | None) -> Path:
     return Path.home() / ".config" / "gearcore" / "skills"
 
 
+def _plugins_dir(scope: str, project_root: Path | None) -> Path:
+    """Scope-specific plugins directory for whole-plugin registrations."""
+    if scope == "project":
+        if project_root is None:
+            raise ValueError("--scope project requires a project root")
+        return project_root / ".gearcore" / "plugins"
+    return Path.home() / ".config" / "gearcore" / "plugins"
+
+
 # ---------------------------------------------------------------------------
 # add-mcp
 # ---------------------------------------------------------------------------
@@ -345,12 +354,15 @@ def remove_mcp(
 def _validated_skill_dest(name: str, dest_dir: Path) -> Path:
     """Join *name* onto *dest_dir*, rejecting anything that could escape it.
 
-    Lexical check only: symlinked skill bundles legitimately resolve
+    This is a lexical check only: symlinked skill bundles legitimately resolve
     outside the skills dir, so the final path must not be resolved here.
-    Rejecting absolute names and '..' components makes escape impossible
-    for the join below.
+    Skill and plugin registrations are single path components; rejecting
+    absolute, dotted, and nested names makes escape impossible for the join.
     """
-    if not name or Path(name).is_absolute() or ".." in Path(name).parts:
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"Invalid skill name: {name!r}")
+    path = Path(name)
+    if path.is_absolute() or len(path.parts) != 1 or path.parts[0] in {".", ".."}:
         raise ValueError(f"Invalid skill name: {name!r}")
     return dest_dir / name
 
@@ -370,3 +382,62 @@ def remove_skill(
         shutil.rmtree(dest)
     logger.info("Removed skill '%s' from %s", name, dest.parent)
     return dest.parent
+
+
+def _skill_links_inside(
+    plugin_path: Path, scope: str, project_root: Path | None
+) -> list[Path]:
+    """Skill symlinks in the skills dir that point inside *plugin_path*.
+
+    Only symlinks qualify: a real directory in the skills dir is never
+    touched, and only the link itself is ever deleted — never its target.
+    """
+    skills_root = _skills_dir(scope, project_root)
+    if not skills_root.is_dir():
+        return []
+    try:
+        inside_root = plugin_path.resolve()
+    except OSError:
+        inside_root = plugin_path
+    links: list[Path] = []
+    for entry in sorted(skills_root.iterdir()):
+        if not entry.is_symlink():
+            continue
+        try:
+            target = entry.resolve()
+        except OSError:
+            continue
+        if target == inside_root or inside_root in target.parents:
+            links.append(entry)
+    return links
+
+
+def remove_plugin(
+    name: str,
+    scope: str = "global",
+    project_root: Path | None = None,
+) -> Path:
+    """Remove a registered plugin and the skill links pointing into it.
+
+    Removes only the registered plugin path under the plugins dir plus skill
+    symlinks whose targets resolve inside that registered plugin. External
+    sources of symlinks are never deleted.
+    """
+    plugin_path = _validated_skill_dest(name, _plugins_dir(scope, project_root))
+    if not plugin_path.exists() and not plugin_path.is_symlink():
+        raise FileNotFoundError(f"Plugin '{name}' not found at {plugin_path}")
+
+    links = _skill_links_inside(plugin_path, scope, project_root)
+    if plugin_path.is_symlink():
+        plugin_path.unlink()
+    else:
+        shutil.rmtree(plugin_path)
+    for link in links:
+        link.unlink()
+    logger.info(
+        "Removed plugin '%s' from %s (%d skill links)",
+        name,
+        plugin_path.parent,
+        len(links),
+    )
+    return plugin_path.parent

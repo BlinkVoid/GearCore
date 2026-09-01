@@ -11,9 +11,9 @@ Subcommands:
   add-mcp        Register a new MCP server
   add-skill      Register a skill bundle
   add-cli        Wrap a CLI program into a skill via CLI-Anything
-  remove         Remove an MCP server or skill
+  remove         Remove an MCP server, skill, or plugin registration
   sync           Install/update the GearCore self-skill on AI CLI tools
-  onboard        Discover and register MCP servers and/or skills from a core package
+  onboard        Discover/register MCP servers, skills, or whole plugins from a package
 
 Usage:
   gearcore [--project <path>] list-skills
@@ -23,9 +23,9 @@ Usage:
   gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
   gearcore add-skill <path> [--scope global|project] [--symlink]
   gearcore add-cli <program> [--scope global|project]
-  gearcore remove mcp <id> | skill <name> [--scope global|project]
+  gearcore remove mcp <id> | skill <name> | plugin <name> [--scope global|project]
   gearcore sync [--tool claude|codex|kimi|opencode] [--dry-run] [--remove]
-  gearcore onboard <core-path> [--scope global|project]
+  gearcore onboard <core-path> [--scope global|project]   # core or plugin root
   gearcore status
 """
 
@@ -548,9 +548,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_add_cli.add_argument("--scope", default="global", choices=["global", "project"])
 
     # remove
-    p_remove = sub.add_parser("remove", help="Remove an MCP server or skill")
-    p_remove.add_argument("type", choices=["mcp", "skill"])
-    p_remove.add_argument("name", help="ID (for mcp) or name (for skill)")
+    p_remove = sub.add_parser("remove", help="Remove an MCP server, skill, or plugin")
+    p_remove.add_argument("type", choices=["mcp", "skill", "plugin"])
+    p_remove.add_argument(
+        "name", help="ID (for mcp), name (for skill), or plugin name (for plugin)"
+    )
     p_remove.add_argument("--scope", default="global", choices=["global", "project"])
 
     # sync
@@ -567,7 +569,7 @@ def build_parser() -> argparse.ArgumentParser:
     # onboard
     p_onboard = sub.add_parser(
         "onboard",
-        help="Discover and register MCP servers and/or skills from a core package",
+        help="Discover/register MCP servers, skills, or whole plugins from a package",
     )
     p_onboard.add_argument("core_path", help="Path to the core directory")
     p_onboard.add_argument("--scope", default="global", choices=["global", "project"])
@@ -582,7 +584,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_onboard.add_argument(
         "--copy-skills",
         action="store_true",
-        help="Copy skill bundles (default: symlink)",
+        help="Copy instead of symlink (whole plugin root for detected plugins)",
     )
     p_onboard.add_argument("--dry-run", action="store_true")
     p_onboard.add_argument(
@@ -731,15 +733,17 @@ def main():
         return
 
     if command == "remove":
-        from gearcore_hub.registry import remove_mcp, remove_skill
+        from gearcore_hub.registry import remove_mcp, remove_plugin, remove_skill
 
         try:
             if args.type == "mcp":
                 remove_mcp(args.name, scope=args.scope, project_root=project_path)
-            else:
+            elif args.type == "skill":
                 remove_skill(args.name, scope=args.scope, project_root=project_path)
+            else:
+                remove_plugin(args.name, scope=args.scope, project_root=project_path)
             print(f"Removed {args.type} '{args.name}'")
-        except (KeyError, FileNotFoundError) as exc:
+        except (KeyError, FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         return

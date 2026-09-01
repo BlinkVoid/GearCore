@@ -22,9 +22,34 @@ def _bundle(name: str = "demo", mcp_servers: list | None = None) -> SkillBundle:
 
 
 class TestRenderSkillInstructions:
-    def test_plain_skill_renders_instructions_only(self):
+    def test_plain_skill_renders_instructions_and_bundle_location(self):
         out = render_skill_instructions(_bundle())
-        assert out == "# demo\n\nDo the thing."
+        assert out.startswith("# demo\n\nDo the thing.")
+        assert "## Skill bundle location" in out
+
+    def test_bundle_location_lists_registered_and_resolved_paths(self, tmp_path):
+        real = tmp_path / "real" / "demo"
+        real.mkdir(parents=True)
+        registered = tmp_path / "skills" / "demo"
+        registered.parent.mkdir()
+        registered.symlink_to(real)
+        bundle = _bundle()
+        bundle.path = registered
+
+        out = render_skill_instructions(bundle)
+
+        assert f"Registered at: `{registered}`" in out
+        assert f"Resolved bundle root: `{real}`" in out
+        assert "resolve from the resolved bundle root" in out
+
+    def test_bundle_location_works_without_symlink(self, tmp_path):
+        bundle = _bundle()
+        bundle.path = tmp_path / "skills" / "demo"
+
+        out = render_skill_instructions(bundle)
+
+        assert f"Registered at: `{bundle.path}`" in out
+        assert f"Resolved bundle root: `{bundle.path.resolve()}`" in out
 
     def test_mcp_skill_appends_call_commands(self):
         bundle = _bundle(
