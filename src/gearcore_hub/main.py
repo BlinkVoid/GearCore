@@ -528,7 +528,7 @@ def _binary_value_metadata(value) -> dict:
     if isinstance(value, str):
         return _binary_content_fields(value)
 
-    metadata = {"binary_type": type(value).__name__}
+    metadata: dict[str, object] = {"binary_type": type(value).__name__}
     with contextlib.suppress(TypeError):
         metadata["value_length"] = len(value)
     return metadata
@@ -641,7 +641,8 @@ def _normalize_unknown_content(item) -> dict:
     data = _model_json_dict(item)
     if data is None:
         return {"type": type(item).__name__}
-    return _sanitize_unknown_json(data)
+    sanitized = _sanitize_unknown_json(data)
+    return sanitized if isinstance(sanitized, dict) else {"type": type(item).__name__}
 
 
 def _devcore_command_failure(result) -> bool:
@@ -674,7 +675,8 @@ def _devcore_command_failure(result) -> bool:
         type(ok) is not bool
         or type(exit_code) is not int
         or type(timed_out) is not bool
-        or type(elapsed) not in (int, float)
+        or not isinstance(elapsed, (int, float))
+        or isinstance(elapsed, bool)
         or elapsed < 0
     ):
         return False
