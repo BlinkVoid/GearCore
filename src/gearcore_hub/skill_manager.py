@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel
 
 from gearcore_hub.config import EffectiveConfig
@@ -59,6 +60,33 @@ class SkillBundle:
 # ---------------------------------------------------------------------------
 
 
+def _frontmatter_metadata(instructions: str) -> dict[str, str]:
+    """
+    Extract name/description from SKILL.md YAML frontmatter.
+
+    Mirrors onboard._extract_skill_name: only a mapping frontmatter with
+    non-blank string scalars yields metadata; malformed or non-conforming
+    frontmatter yields nothing so callers fall back to manifest or path name.
+    """
+    if not instructions.startswith("---\n"):
+        return {}
+    parts = instructions.split("---", 2)
+    if len(parts) < 2:
+        return {}
+    try:
+        frontmatter = yaml.safe_load(parts[1])
+    except Exception:
+        return {}
+    if not isinstance(frontmatter, dict):
+        return {}
+    metadata: dict[str, str] = {}
+    for key in ("name", "description"):
+        value = frontmatter.get(key)
+        if isinstance(value, str) and value.strip():
+            metadata[key] = value
+    return metadata
+
+
 class SkillManager:
     """
     Loads and gates skills based on EffectiveConfig.
@@ -73,6 +101,7 @@ class SkillManager:
         self.skills: dict[str, SkillBundle] = {}
         self.active_skills: set[str] = set()
         self.broken_skills: dict[str, str] = {}  # name → broken target path
+        self.broken_skill_scopes: dict[str, bool] = {}  # name → project-local
         self._load()
         self._auto_activate_core()
 
@@ -83,6 +112,7 @@ class SkillManager:
     def _load(self):
         self.skills.clear()
         self.broken_skills.clear()
+        self.broken_skill_scopes.clear()
         project_local_dir: Path | None = None
         if self.config.project_root is not None:
             project_local_dir = self.config.project_root / ".gearcore" / "skills"
@@ -116,6 +146,7 @@ class SkillManager:
             if skill_path.is_symlink() and not skill_path.exists():
                 target = str(skill_path.resolve())
                 self.broken_skills[skill_path.name] = target
+                self.broken_skill_scopes[skill_path.name] = is_project_local
                 logger.warning(
                     "Broken symlink for skill '%s' → %s (target missing)",
                     skill_path.name,
@@ -131,7 +162,8 @@ class SkillManager:
         if not instructions_file.exists():
             return
 
-        # manifest.json is optional — synthesise a minimal one from SKILL.md name
+        # manifest.json is optional — metadata falls back to SKILL.md
+        # frontmatter, then path name (resolved below)
         manifest_file = skill_path / "manifest.json"
         if manifest_file.exists():
             try:
@@ -141,13 +173,24 @@ class SkillManager:
                 logger.error("Bad manifest at %s: %s", manifest_file, exc)
                 return
         else:
-            manifest = SkillManifest(name=skill_path.name, description="")
+            # No manifest: start blank so SKILL.md frontmatter and then the
+            # path directory name supply identity and description below.
+            manifest = SkillManifest(name="", description="")
 
         try:
             instructions = instructions_file.read_text(encoding="utf-8")
         except Exception as exc:
             logger.error("Cannot read SKILL.md at %s: %s", instructions_file, exc)
             return
+
+        # SKILL.md frontmatter fills in missing or blank manifest metadata;
+        # explicit manifest values win and the path directory name is the
+        # final identity fallback.
+        frontmatter = _frontmatter_metadata(instructions)
+        if not manifest.name.strip():
+            manifest.name = frontmatter.get("name") or skill_path.name
+        if not manifest.description.strip():
+            manifest.description = frontmatter.get("description", "")
 
         bundle = SkillBundle(
             path=skill_path,
@@ -204,6 +247,19 @@ class SkillManager:
                     result.add(name)
 
         return result
+
+    @property
+    def visible_broken_skill_names(self) -> set[str]:
+        """Names of broken symlinks visible in the current context."""
+        allowlist = self.config.global_skill_allowlist
+        return {
+            name
+            for name, is_project_local in self.broken_skill_scopes.items()
+            if (
+                (is_project_local and self.config.project_root is not None)
+                or (not is_project_local and (allowlist is None or name in allowlist))
+            )
+        }
 
     # ------------------------------------------------------------------
     # Public API

@@ -16,9 +16,9 @@ Subcommands:
   onboard        Discover/register MCP servers, skills, or whole plugins from a package
 
 Usage:
-  gearcore [--project <path>] list-skills
+  gearcore [--project <path>] list-skills [--compact]
   gearcore [--project <path>] request-skill <name>
-  gearcore call <server_id> <tool> ['<json_args>']
+  gearcore call <server_id> <tool> ['<json_args>'] [--json]
   gearcore [--project <path>] [serve]
   gearcore add-mcp --id <id> --type stdio --command <cmd> [--args ...]
   gearcore add-skill <path> [--scope global|project] [--symlink]
@@ -33,7 +33,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import contextlib
+import hashlib
+import json
 import logging
 import sys
 from pathlib import Path
@@ -41,7 +45,15 @@ from pathlib import Path
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    AudioContent,
+    EmbeddedResource,
+    ImageContent,
+    ResourceLink,
+    TextContent,
+    TextResourceContents,
+    Tool,
+)
 
 from gearcore_hub.config import EffectiveConfig, load_config
 from gearcore_hub.conflict_resolver import ConflictResolver
@@ -336,9 +348,63 @@ def cmd_status(config: EffectiveConfig):
 # list-skills command
 # ---------------------------------------------------------------------------
 
+# Version tag embedded in `list-skills --compact` payloads so consumers can
+# detect the schema shape independently of the package version.
+LIST_SKILLS_COMPACT_SCHEMA = "gearcore.list-skills/2"
+COMPACT_SKILL_FIELDS = ("name", "description", "scope", "status")
+COMPACT_BROKEN_FIELDS = ("name", "target")
 
-def cmd_list_skills(config: EffectiveConfig):
+
+def compact_skills_payload(config: EffectiveConfig, sm: SkillManager) -> dict:
+    """
+    Metadata-only listing for the opt-in `--compact` output mode.
+
+    Never includes SKILL.md bodies, skills hidden by a project allowlist,
+    or metadata for broken/malformed bundles outside the visible scope.
+    `complete` is always True: this ticket imposes no response budget.
+
+    Version 2 is a columnar payload: `skill_fields` declares each value in a
+    skill row, `source_identity` derives its stable source identity, and
+    `request_template` derives the exact request command. `broken_fields`
+    similarly declares the values in each broken row.
+    """
+    visible = sm.visible_skill_names
+    skills: list[list[str]] = []
+    for name in sorted(n for n in sm.skills if n in visible):
+        bundle = sm.skills[name]
+        skills.append(
+            [
+                bundle.manifest.name,
+                bundle.manifest.description,
+                "project" if bundle.is_project_local else "global",
+                "active" if name in sm.active_skills else "available",
+            ]
+        )
+    broken = [
+        [broken_name, target]
+        for broken_name, target in sorted(sm.broken_skills.items())
+        if broken_name in sm.visible_broken_skill_names
+    ]
+    return {
+        "schema": LIST_SKILLS_COMPACT_SCHEMA,
+        "context": config.context_name,
+        "complete": True,
+        "skill_fields": COMPACT_SKILL_FIELDS,
+        "source_identity": "{scope}:{name}",
+        "request_template": "gearcore request-skill {name}",
+        "skills": skills,
+        "broken_fields": COMPACT_BROKEN_FIELDS,
+        "broken": broken,
+    }
+
+
+def cmd_list_skills(config: EffectiveConfig, compact: bool = False):
     sm = SkillManager(config)
+    if compact:
+        payload = compact_skills_payload(config, sm)
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        return
+
     skills = sm.list_available_skills()
     ctx = config.context_name
     print(f"GearCore skills ({ctx} context):\n")
@@ -403,8 +469,265 @@ def cmd_request_skill(config: EffectiveConfig, skill_name: str):
 # call command — stateless MCP tool invocation via CLI
 # ---------------------------------------------------------------------------
 
+# Version tag embedded in `call --json` envelopes so shell automation can
+# detect the schema shape independently of the package version.
+CALL_SCHEMA = "gearcore.call/1"
 
-def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str):
+DEVCORE_SERVER_ID = "devcore"
+DEVCORE_COMMAND_TOOLS = frozenset({"devcore_run", "devcore_poll"})
+
+# Outcome statuses carried by the structured envelope. The three failure
+# classes required by the ticket plus usage/config errors that happen before
+# any backend is contacted.
+CALL_STATUS_SUCCESS = "success"
+CALL_STATUS_USAGE_ERROR = "usage_error"
+CALL_STATUS_TRANSPORT_ERROR = "transport_error"
+CALL_STATUS_MCP_TOOL_ERROR = "mcp_tool_error"
+CALL_STATUS_NESTED_COMMAND_FAILURE = "nested_command_failure"
+
+# Exit mapping for `call --json`. 2 keeps the argparse usage-error convention
+# (argparse exits 2 for malformed CLI usage; this is the semantic equivalent
+# for unknown/disabled servers and bad JSON args). 3-5 distinguish the three
+# tool-outcome failure classes. Legacy text mode keeps its single coarse
+# nonzero code (1) for every failure.
+CALL_EXIT_USAGE_ERROR = 2
+CALL_EXIT_TRANSPORT_ERROR = 3
+CALL_EXIT_MCP_TOOL_ERROR = 4
+CALL_EXIT_NESTED_COMMAND_FAILURE = 5
+
+_CALL_STATUS_EXIT = {
+    CALL_STATUS_USAGE_ERROR: CALL_EXIT_USAGE_ERROR,
+    CALL_STATUS_TRANSPORT_ERROR: CALL_EXIT_TRANSPORT_ERROR,
+    CALL_STATUS_MCP_TOOL_ERROR: CALL_EXIT_MCP_TOOL_ERROR,
+    CALL_STATUS_NESTED_COMMAND_FAILURE: CALL_EXIT_NESTED_COMMAND_FAILURE,
+}
+
+
+def _binary_content_fields(encoded: str) -> dict:
+    """Describe base64 content without emitting the encoded or raw payload."""
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, TypeError, ValueError):
+        # Undecodable payload: keep an explicitly bounded description of the
+        # base64 text instead of guessing a byte length or echoing it.
+        return {"data_encoding": "base64", "encoded_length": len(encoded)}
+    return {
+        "byte_length": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _binary_value_metadata(value) -> dict:
+    """Describe an unknown binary field without retaining its value."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        return {
+            "byte_length": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    if isinstance(value, str):
+        return _binary_content_fields(value)
+
+    metadata = {"binary_type": type(value).__name__}
+    with contextlib.suppress(TypeError):
+        metadata["value_length"] = len(value)
+    return metadata
+
+
+def _sanitize_unknown_json(value, *, field_name: str | None = None):
+    """Recursively make future content JSON-safe without leaking binary fields."""
+    if field_name is not None and field_name.casefold() in {"data", "blob"}:
+        return _binary_value_metadata(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_unknown_json(item, field_name=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_unknown_json(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_unknown_json(item) for item in value]
+
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        return {"type": type(value).__name__}
+    return value
+
+
+def _model_json_dict(item) -> dict | None:
+    """Serialize a Pydantic content model to a JSON-safe mapping."""
+    try:
+        data = json.loads(item.model_dump_json(exclude_none=True))
+    except Exception:
+        try:
+            data = item.model_dump(mode="json", exclude_none=True)
+        except Exception:
+            return None
+    return data if isinstance(data, dict) else None
+
+
+def _stable_mime_type(data: dict) -> dict:
+    """Retain the structured envelope's snake-case media-type key."""
+    if "mimeType" in data:
+        data["mime_type"] = data.pop("mimeType")
+    return data
+
+
+def _normalize_content(content) -> list[dict]:
+    """Normalize MCP content blocks in order, never emitting raw binary.
+
+    Pydantic JSON-safe metadata is preserved for every known block. Text and
+    text-resource payloads are preserved verbatim; image/audio/blob payloads
+    are represented by type, media type, byte length, and a stable sha256
+    digest; resource links keep their metadata fields.
+    """
+    blocks: list[dict] = []
+    for item in content or []:
+        if isinstance(item, TextContent):
+            data = _model_json_dict(item)
+            blocks.append(data or {"type": "text", "text": item.text})
+        elif isinstance(item, ImageContent):
+            data = _model_json_dict(item) or {"type": "image"}
+            data.pop("data", None)
+            data.update(_binary_content_fields(item.data))
+            blocks.append(_stable_mime_type(data))
+        elif isinstance(item, AudioContent):
+            data = _model_json_dict(item) or {"type": "audio"}
+            data.pop("data", None)
+            data.update(_binary_content_fields(item.data))
+            blocks.append(_stable_mime_type(data))
+        elif isinstance(item, EmbeddedResource):
+            resource = item.resource
+            outer = _model_json_dict(item) or {"type": "resource"}
+            nested = _model_json_dict(resource) or {}
+            block = {
+                "type": outer.get("type", "resource"),
+                "uri": str(resource.uri),
+            }
+            if resource.mimeType is not None:
+                block["mime_type"] = resource.mimeType
+            if isinstance(resource, TextResourceContents):
+                block["text"] = resource.text
+            else:
+                binary = nested.pop("blob", resource.blob)
+                binary_metadata = _binary_content_fields(binary)
+                block.update(binary_metadata)
+                nested.update(binary_metadata)
+
+            # Keep the established flattened keys while retaining the outer
+            # block metadata and the complete sanitized nested resource.
+            for key, value in outer.items():
+                if key not in {"type", "resource"}:
+                    block[key] = value
+            nested = _stable_mime_type(nested)
+            block["resource"] = nested
+            blocks.append(block)
+        elif isinstance(item, ResourceLink):
+            data = _model_json_dict(item) or {
+                "type": "resource_link",
+                "name": item.name,
+                "uri": str(item.uri),
+            }
+            data["uri"] = str(item.uri)
+            blocks.append(_stable_mime_type(data))
+        else:
+            blocks.append(_normalize_unknown_content(item))
+    return blocks
+
+
+def _normalize_unknown_content(item) -> dict:
+    """JSON-safe fallback for future content types; binary fields bounded."""
+    data = _model_json_dict(item)
+    if data is None:
+        return {"type": type(item).__name__}
+    return _sanitize_unknown_json(data)
+
+
+def _devcore_command_failure(result) -> bool:
+    """Narrow nested-adapter gate for the DevCore command tools.
+
+    DevCore command tools (devcore_run/devcore_poll)
+    return a single JSON text object. Only when that object satisfies the
+    DevCore run contract — ``ok`` bool, ``exit_code`` int, ``timed_out`` bool,
+    ``elapsed_seconds`` non-negative number, with ``ok == (exit_code == 0 and
+    not timed_out)``, the exact validation DevCore itself applies — and ``ok``
+    is False is this a nested command failure. Anything else (domain payloads,
+    plain text, multi-block results, malformed JSON) is not interpreted.
+    """
+    if len(result.content) != 1:
+        return False
+    block = result.content[0]
+    if not isinstance(block, TextContent):
+        return False
+    try:
+        data = json.loads(block.text)
+    except ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    ok = data.get("ok")
+    exit_code = data.get("exit_code")
+    timed_out = data.get("timed_out")
+    elapsed = data.get("elapsed_seconds")
+    if (
+        type(ok) is not bool
+        or type(exit_code) is not int
+        or type(timed_out) is not bool
+        or type(elapsed) not in (int, float)
+        or elapsed < 0
+    ):
+        return False
+    if ok != (exit_code == 0 and not timed_out):
+        return False
+    return ok is False
+
+
+def _build_call_envelope(
+    server_id: str,
+    tool: str,
+    status: str,
+    *,
+    mcp_is_error: bool = False,
+    result=None,
+    error: str | None = None,
+) -> dict:
+    envelope = {
+        "schema": CALL_SCHEMA,
+        "server": server_id,
+        "tool": tool,
+        "ok": status == CALL_STATUS_SUCCESS,
+        "status": status,
+        "mcp_is_error": bool(mcp_is_error),
+        "content": _normalize_content(result.content) if result is not None else [],
+        "structured_content": (
+            getattr(result, "structuredContent", None) if result is not None else None
+        ),
+    }
+    if error is not None:
+        envelope["error"] = error
+    return envelope
+
+
+def _emit_call_envelope(envelope: dict) -> None:
+    print(json.dumps(envelope, sort_keys=True, separators=(",", ":")))
+
+
+def cmd_call(
+    config: EffectiveConfig,
+    server_id: str,
+    tool: str,
+    args_json: str,
+    structured: bool = False,
+):
+    """Invoke one tool on one MCP backend, statelessly.
+
+    Legacy text mode (default) prints content exactly as before; the only
+    behavior change is failure-aware exits (nonzero for MCP tool errors and
+    nested DevCore command failures). Structured mode (--json) emits exactly
+    one deterministic JSON envelope on stdout, diagnostics on stderr, and
+    classifies failures by exit code.
+    """
     import json as _json
 
     # Find the server config (use effective config to respect project scope)
@@ -415,18 +738,45 @@ def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str)
             break
 
     if not server_cfg:
-        print(f"error: server '{server_id}' not found in gearcore config")
+        message = f"server '{server_id}' not found in gearcore config"
+        if structured:
+            _emit_call_envelope(
+                _build_call_envelope(
+                    server_id, tool, CALL_STATUS_USAGE_ERROR, error=message
+                )
+            )
+            print(f"error: {message}", file=sys.stderr)
+            sys.exit(CALL_EXIT_USAGE_ERROR)
+        print(f"error: {message}")
         sys.exit(1)
 
     # config.mcp_servers already filters to enabled servers, but double-check
     if not server_cfg.enabled:
-        print(f"error: server '{server_id}' is disabled in gearcore config")
+        message = f"server '{server_id}' is disabled in gearcore config"
+        if structured:
+            _emit_call_envelope(
+                _build_call_envelope(
+                    server_id, tool, CALL_STATUS_USAGE_ERROR, error=message
+                )
+            )
+            print(f"error: {message}", file=sys.stderr)
+            sys.exit(CALL_EXIT_USAGE_ERROR)
+        print(f"error: {message}")
         sys.exit(1)
 
     try:
         tool_args = _json.loads(args_json) if args_json else {}
     except _json.JSONDecodeError as exc:
-        print(f"error: invalid JSON arguments: {exc}")
+        message = f"invalid JSON arguments: {exc}"
+        if structured:
+            _emit_call_envelope(
+                _build_call_envelope(
+                    server_id, tool, CALL_STATUS_USAGE_ERROR, error=message
+                )
+            )
+            print(f"error: {message}", file=sys.stderr)
+            sys.exit(CALL_EXIT_USAGE_ERROR)
+        print(f"error: {message}")
         sys.exit(1)
 
     async def _run():
@@ -441,21 +791,72 @@ def cmd_call(config: EffectiveConfig, server_id: str, tool: str, args_json: str)
         try:
             await server.start()
             result = await server.session.call_tool(tool, tool_args)
-            for content in result.content:
-                if hasattr(content, "text"):
-                    print(content.text)
-                elif hasattr(content, "data"):
-                    data = content.data
-                    if isinstance(data, bytes):
-                        data = data.decode("utf-8", errors="replace")
-                    print(data)
         finally:
             await server.stop()
+        return result
 
     try:
-        asyncio.run(_run())
+        result = asyncio.run(_run())
     except Exception as exc:
+        if structured:
+            _emit_call_envelope(
+                _build_call_envelope(
+                    server_id,
+                    tool,
+                    CALL_STATUS_TRANSPORT_ERROR,
+                    error=str(exc),
+                )
+            )
+            print(f"error: {server_id}/{tool} — {exc}", file=sys.stderr)
+            sys.exit(CALL_EXIT_TRANSPORT_ERROR)
         print(f"error: {server_id}/{tool} — {exc}")
+        sys.exit(1)
+
+    nested_failure = (
+        server_id == DEVCORE_SERVER_ID
+        and tool in DEVCORE_COMMAND_TOOLS
+        and _devcore_command_failure(result)
+    )
+
+    if structured:
+        if result.isError:
+            status = CALL_STATUS_MCP_TOOL_ERROR
+        elif nested_failure:
+            status = CALL_STATUS_NESTED_COMMAND_FAILURE
+        else:
+            status = CALL_STATUS_SUCCESS
+        _emit_call_envelope(
+            _build_call_envelope(
+                server_id,
+                tool,
+                status,
+                mcp_is_error=bool(result.isError),
+                result=result,
+            )
+        )
+        if status != CALL_STATUS_SUCCESS:
+            print(f"error: {server_id}/{tool} — {status}", file=sys.stderr)
+            sys.exit(_CALL_STATUS_EXIT[status])
+        return
+
+    # Legacy text mode: stdout shape is frozen compatibility surface.
+    for content in result.content:
+        if hasattr(content, "text"):
+            print(content.text)
+        elif hasattr(content, "data"):
+            data = content.data
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="replace")
+            print(data)
+
+    if result.isError:
+        print(f"error: {server_id}/{tool} — tool reported isError", file=sys.stderr)
+        sys.exit(1)
+    if nested_failure:
+        print(
+            f"error: {server_id}/{tool} — DevCore command failed (ok=false)",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -493,8 +894,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="Alias for status")
 
     # list-skills
-    sub.add_parser(
+    p_list_skills = sub.add_parser(
         "list-skills", help="Enumerate available skills in the current context"
+    )
+    p_list_skills.add_argument(
+        "--compact",
+        action="store_true",
+        help="Emit deterministic compact JSON metadata (no SKILL.md bodies)",
     )
 
     # request-skill
@@ -509,6 +915,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_call.add_argument("tool", help="Tool name to call (e.g. read_file)")
     p_call.add_argument(
         "args_json", nargs="?", default="", help="JSON-encoded arguments (default: {})"
+    )
+    p_call.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit one deterministic versioned JSON envelope on stdout "
+        "(schema gearcore.call/1); exit codes: 0 success, 2 usage error, "
+        "3 transport error, 4 MCP tool error, 5 nested command failure",
     )
 
     # add-mcp
@@ -661,7 +1074,7 @@ def main():
         return
 
     if command == "list-skills":
-        cmd_list_skills(config)
+        cmd_list_skills(config, compact=args.compact)
         return
 
     if command == "request-skill":
@@ -669,7 +1082,9 @@ def main():
         return
 
     if command == "call":
-        cmd_call(config, args.server_id, args.tool, args.args_json)
+        cmd_call(
+            config, args.server_id, args.tool, args.args_json, structured=args.json
+        )
         return
 
     if command == "serve":

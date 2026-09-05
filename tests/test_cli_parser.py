@@ -15,6 +15,17 @@ def test_update_superpowers_parser():
     assert args.dry_run is True
 
 
+def test_list_skills_compact_flag():
+    parser = build_parser()
+    args = parser.parse_args(["list-skills"])
+    assert args.command == "list-skills"
+    assert args.compact is False
+
+    args = parser.parse_args(["list-skills", "--compact"])
+    assert args.command == "list-skills"
+    assert args.compact is True
+
+
 def test_add_mcp_command_flag_does_not_clobber_subcommand():
     # Regression: --command shared dest="command" with the subparser action,
     # so `add-mcp --command uvx` dispatched to "uvx" (no-op help) instead.

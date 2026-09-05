@@ -233,7 +233,7 @@ list_tools → now includes browser_navigate, browser_click, ...
 |---------|-------------|
 | `gearcore list-skills` | List available skills in current context |
 | `gearcore request-skill <name>` | Unlock a skill and expose its tools |
-| `gearcore call <server> <tool> '<json>'` | One-shot tool invocation on an MCP backend |
+| `gearcore call <server> <tool> '<json>'` | One-shot tool invocation on an MCP backend (add `--json` for structured machine output) |
 | `gearcore status` | Show effective config and running context |
 | `gearcore serve` | Run the MCP hub (used automatically by AI tools) |
 | `gearcore add-mcp` | Register a new MCP server (`--scope project` for a project-local def, add `--allowlist` to allowlist an existing global server instead) |
@@ -245,6 +245,55 @@ list_tools → now includes browser_navigate, browser_click, ...
 | `gearcore update [mcp\|skill\|superpowers] [name]` | Version-aware refresh of registered resources, then re-sync |
 
 All commands accept `--project <path>` for project-scoped context and `-v` for verbose output.
+
+### Structured output for `call`
+
+`gearcore call --json` (schema `gearcore.call/1`) prints exactly one
+deterministic JSON envelope to stdout and sends diagnostics to stderr. Shell
+automation classifies outcomes via `status`/`ok` and the exit code:
+
+| Outcome | `status` | Exit |
+|---------|----------|------|
+| Tool succeeded | `success` | 0 |
+| Unknown/disabled server, bad JSON args | `usage_error` | 2 |
+| Backend failed to start or transport broke | `transport_error` | 3 |
+| MCP result `isError` | `mcp_tool_error` | 4 |
+| `devcore` server command tool returned `ok: false` | `nested_command_failure` | 5 |
+
+Example envelope (pretty-printed here; actual output is minified):
+
+```json
+{
+  "schema": "gearcore.call/1",
+  "server": "devcore",
+  "tool": "devcore_run",
+  "ok": false,
+  "status": "nested_command_failure",
+  "mcp_is_error": false,
+  "content": [
+    {"type": "text", "text": "{\"ok\": false, \"exit_code\": 1, ...}"}
+  ],
+  "structured_content": null
+}
+```
+
+Content blocks are normalized in order: text is preserved verbatim; image,
+audio, and binary resource payloads are represented by type, media type, byte
+length, and sha256 digest (raw binary is never printed); resource links keep
+their metadata; `structuredContent` from the backend is passed through as
+`structured_content` without stringification.
+
+The nested adapter applies only to the server id `devcore` and the exact
+command tools `devcore_run` and `devcore_poll`, and only when the result is a
+single JSON text object satisfying the DevCore run contract
+(`ok`/`exit_code`/`timed_out`/`elapsed_seconds` with
+`ok == (exit_code == 0 and not timed_out)`). A generic domain tool's `ok`
+field is never interpreted on any server.
+
+Legacy text mode (without `--json`) keeps its historical stdout shape. Its
+documented behavior change: MCP tool errors and nested DevCore command
+failures now exit with code 1 (they previously exited 0); transport failures
+already exited 1.
 
 ## Writing a Skill
 

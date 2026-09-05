@@ -1,5 +1,6 @@
 """Tests for the skill manager."""
 
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -14,6 +15,19 @@ def _make_skill_dir(base: Path, name: str, manifest: dict = None) -> Path:
         f"---\nname: {name}\ndescription: test\n---\n\n# {name}"
     )
     if manifest:
+        import json
+
+        (skill_dir / "manifest.json").write_text(json.dumps(manifest))
+    return skill_dir
+
+
+def _make_raw_skill_dir(
+    base: Path, name: str, skill_md: str, manifest: dict = None
+) -> Path:
+    skill_dir = base / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(skill_md)
+    if manifest is not None:
         import json
 
         (skill_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -138,6 +152,270 @@ class TestToolActivation:
             assert sm.is_tool_active("playwright", "browser_navigate") is True
             assert sm.is_tool_active("playwright", "other_tool") is False
             assert sm.is_tool_active("other_server", "browser_navigate") is False
+
+
+class TestMetadataFallback:
+    def test_manifest_less_skill_uses_frontmatter_name_and_description(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir,
+                "dir-name",
+                "---\nname: front-name\ndescription: from frontmatter\n---\n\n# body",
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("front-name")
+            assert bundle is not None
+            assert bundle.manifest.name == "front-name"
+            assert bundle.manifest.description == "from frontmatter"
+            assert "dir-name" not in sm.skills
+
+    def test_multiline_frontmatter_description(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir,
+                "dir-name",
+                "---\nname: multi-desc\ndescription: |\n  First line.\n  Second line.\n---\n\nbody",
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("multi-desc")
+            assert bundle is not None
+            assert bundle.manifest.description == "First line.\nSecond line.\n"
+
+    def test_malformed_frontmatter_falls_back_to_path_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir, "dir-name", "---\nname: [unclosed\n---\n\nbody"
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("dir-name")
+            assert bundle is not None
+            assert bundle.manifest.name == "dir-name"
+            assert bundle.manifest.description == ""
+
+    def test_non_mapping_frontmatter_falls_back_to_path_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir, "dir-name", "---\n- just\n- a list\n---\n\nbody"
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("dir-name")
+            assert bundle is not None
+            assert bundle.manifest.name == "dir-name"
+            assert bundle.manifest.description == ""
+
+    def test_non_string_frontmatter_values_fall_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir,
+                "dir-name",
+                "---\nname: 123\ndescription: [nope]\n---\n\nbody",
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("dir-name")
+            assert bundle is not None
+            assert bundle.manifest.name == "dir-name"
+            assert bundle.manifest.description == ""
+
+    def test_empty_skill_md_falls_back_to_path_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(skills_dir, "dir-name", "")
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("dir-name")
+            assert bundle is not None
+            assert bundle.manifest.name == "dir-name"
+            assert bundle.manifest.description == ""
+
+    def test_broken_symlink_reported_not_catalogued(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            real_dir = Path(tmp) / "elsewhere" / "gone-skill"
+            real_dir.mkdir(parents=True)
+            (real_dir / "SKILL.md").write_text(
+                "---\nname: gone-skill\ndescription: temp\n---\n\nbody"
+            )
+            skills_dir.mkdir()
+            link = skills_dir / "gone-skill"
+            link.symlink_to(real_dir)
+            shutil.rmtree(real_dir)
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            assert "gone-skill" in sm.broken_skills
+            assert sm.get_skill("gone-skill") is None
+            assert sm.get_skill("dir-name") is None
+
+    def test_malformed_manifest_skips_skill_despite_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            skill_dir = _make_raw_skill_dir(
+                skills_dir,
+                "dir-name",
+                "---\nname: front-name\ndescription: from frontmatter\n---\n\nbody",
+            )
+            (skill_dir / "manifest.json").write_text("{not valid json")
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            assert sm.get_skill("front-name") is None
+            assert sm.get_skill("dir-name") is None
+
+    def test_explicit_manifest_metadata_wins_over_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir,
+                "dir-name",
+                "---\nname: front-name\ndescription: front desc\n---\n\nbody",
+                manifest={
+                    "name": "manifest-name",
+                    "description": "manifest desc",
+                },
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("manifest-name")
+            assert bundle is not None
+            assert bundle.manifest.name == "manifest-name"
+            assert bundle.manifest.description == "manifest desc"
+            assert sm.get_skill("front-name") is None
+
+    def test_blank_manifest_description_falls_back_to_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir,
+                "dir-name",
+                "---\nname: front-name\ndescription: front desc\n---\n\nbody",
+                manifest={"name": "manifest-name", "description": ""},
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("manifest-name")
+            assert bundle is not None
+            assert bundle.manifest.name == "manifest-name"
+            assert bundle.manifest.description == "front desc"
+
+    def test_missing_manifest_description_falls_back_to_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir,
+                "dir-name",
+                "---\nname: front-name\ndescription: front desc\n---\n\nbody",
+                manifest={"name": "manifest-name"},
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("manifest-name")
+            assert bundle is not None
+            assert bundle.manifest.description == "front desc"
+
+    def test_blank_manifest_name_falls_back_to_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir,
+                "dir-name",
+                "---\nname: front-name\ndescription: front desc\n---\n\nbody",
+                manifest={"name": "", "description": "manifest desc"},
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("front-name")
+            assert bundle is not None
+            assert bundle.manifest.name == "front-name"
+            assert bundle.manifest.description == "manifest desc"
+
+    def test_blank_manifest_name_without_frontmatter_uses_path_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            _make_raw_skill_dir(
+                skills_dir,
+                "dir-name",
+                "# no frontmatter here",
+                manifest={"name": "", "description": "manifest desc"},
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(skills_dir)]})
+            effective = EffectiveConfig(global_cfg, None, None)
+            sm = SkillManager(effective)
+
+            bundle = sm.get_skill("dir-name")
+            assert bundle is not None
+            assert bundle.manifest.name == "dir-name"
+            assert bundle.manifest.description == "manifest desc"
+
+    def test_fallback_metadata_respects_allowlist_and_shadowing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            global_dir = Path(tmp) / "global-skills"
+            project_dir = Path(tmp) / "proj" / ".gearcore" / "skills"
+            _make_raw_skill_dir(
+                global_dir,
+                "dir-name",
+                "---\nname: fm-skill\ndescription: global fm\n---\n\nbody",
+            )
+            _make_raw_skill_dir(
+                project_dir,
+                "dir-name",
+                "---\nname: fm-skill\ndescription: local fm\n---\n\nbody",
+            )
+
+            global_cfg = GlobalConfig(registry={"skills_dirs": [str(global_dir)]})
+            project_cfg = ProjectConfig(scope={"skills": {"include": ["fm-skill"]}})
+            effective = EffectiveConfig(global_cfg, project_cfg, Path(tmp) / "proj")
+            sm = SkillManager(effective)
+
+            assert "fm-skill" in sm.visible_skill_names
+            bundle = sm.get_skill("fm-skill")
+            assert bundle is not None
+            assert bundle.is_project_local is True
+            assert bundle.manifest.description == "local fm"
 
 
 class TestShadowing:

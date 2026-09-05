@@ -63,7 +63,9 @@ gearcore call <server_id> <tool_name> '<json_args>'
 ```
 Each `request-skill` output lists the exact `gearcore call` commands available.
 This is a stateless one-shot invocation — GearCore connects to the backend,
-makes the call, prints the result, and exits.
+makes the call, prints the result, and exits. Add `--json` for a machine-
+readable envelope whose exit code classifies success (0) versus usage (2),
+transport (3), MCP tool error (4), and nested command failure (5).
 
 ## Project-scoped context
 

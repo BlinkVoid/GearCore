@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `gearcore call --json` (schema `gearcore.call/1`): opt-in structured output
+  emitting exactly one deterministic JSON envelope on stdout with diagnostics
+  on stderr. The envelope carries server/tool identity, `ok`/`status`,
+  MCP `isError`, ordered normalized content blocks (binary payloads are
+  represented by type, media type, byte length, and sha256 digest — never
+  printed raw), and pass-through `structured_content`. Exit codes classify
+  success (0), usage errors (2), transport errors (3), MCP tool errors (4),
+  and nested DevCore command failures (5). The nested adapter is gated to the
+  `devcore` server id and exact `devcore_run`/`devcore_poll` command tools and
+  validates the DevCore run contract
+  (`ok`/`exit_code`/`timed_out`/`elapsed_seconds`); generic domain payloads
+  with an `ok` field are never interpreted
 - Whole-plugin onboarding: `gearcore onboard` now detects Codex-compatible
   plugin roots (`.codex-plugin/plugin.json`), validates the manifest name and
   skills path, registers the whole plugin at the scope-specific plugins
@@ -27,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin-backed and ordinary skills)
 
 ### Changed
+- `gearcore call` (legacy text mode) is now failure-aware: MCP results with
+  `isError` and `devcore` command tools returning `ok: false` exit 1 instead
+  of 0. The printed stdout shape is unchanged; transport failures already
+  exited 1
 - `--dry-run` output for plugin onboarding identifies the plugin action and
   the preserved top-level support components (commands, orchestration,
   scripts, config, configs, tests, docs)
